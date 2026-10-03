@@ -97,11 +97,11 @@ CREATE INDEX idx_verification_codes_code ON verification_codes(code);
 CREATE INDEX idx_verification_codes_user ON verification_codes(user_id);
 
 -- Add photo column to users table (for user profile photos)
-ALTER TABLE users ADD COLUMN IF NOT EXISTS photo VARCHAR(255) DEFAULT NULL;
+ALTER TABLE users ADD COLUMN photo VARCHAR(255) DEFAULT NULL;
 
 -- Add address and gender columns to users table
-ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT DEFAULT NULL;
-ALTER TABLE users ADD COLUMN IF NOT EXISTS gender ENUM('Male', 'Female', 'Other') DEFAULT NULL;
+ALTER TABLE users ADD COLUMN address TEXT DEFAULT NULL;
+ALTER TABLE users ADD COLUMN gender ENUM('Male', 'Female', 'Other') DEFAULT NULL;
 
 -- Create announcements table
 CREATE TABLE IF NOT EXISTS announcements (
