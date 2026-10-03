@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" role="img" aria-labelledby="title desc">
+  <title id="title">Barangay San Manuel Logo</title>
+  <desc id="desc">Circular Barangay San Manuel seal for the EcoTrack login page.</desc>
+  <rect width="240" height="240" fill="#ffffff"/>
+  <circle cx="120" cy="120" r="104" fill="#ffffff" stroke="#075b22" stroke-width="6"/>
+  <circle cx="120" cy="120" r="88" fill="#ffffff" stroke="#d4b053" stroke-width="2"/>
+  <circle cx="120" cy="120" r="72" fill="#f7faf6" stroke="#075b22" stroke-width="2"/>
+  <path d="M74 124 120 62l46 62-46 58z" fill="#0f6b2f"/>
+  <path d="M120 62 166 124l-46 58z" fill="#8a1f20"/>
+  <path d="M86 126h68v38H86z" fill="#ffffff"/>
+  <path d="M92 126v38M108 126v38M124 126v38M140 126v38" stroke="#d9e4d7" stroke-width="3"/>
+  <circle cx="105" cy="88" r="12" fill="#0f6b2f"/>
+  <circle cx="135" cy="88" r="12" fill="#8a1f20"/>
+  <circle cx="120" cy="104" r="13" fill="#1e1e1e"/>
+  <path d="M98 118c8-10 36-10 44 0" fill="none" stroke="#1e1e1e" stroke-width="6" stroke-linecap="round"/>
+  <text x="120" y="45" text-anchor="middle" font-family="Arial, sans-serif" font-size="14" font-weight="700" fill="#1e1e1e">BARANGAY SAN MANUEL</text>
+  <text x="120" y="203" text-anchor="middle" font-family="Arial, sans-serif" font-size="22" font-weight="800" letter-spacing="6" fill="#1e1e1e">1991</text>
+  <text x="120" y="161" text-anchor="middle" font-family="Arial, sans-serif" font-size="28" font-weight="900" fill="#8a1f20">B</text>
+  <g fill="#d4b053" stroke="#6b5521" stroke-width=".5">
+    <path d="M42 116l3 7 8 .5-6 5 2 8-7-4-7 4 2-8-6-5 8-.5z"/>
+    <path d="M198 116l3 7 8 .5-6 5 2 8-7-4-7 4 2-8-6-5 8-.5z"/>
+    <path d="M64 171l2 5 6 .4-5 4 2 6-5-3-5 3 2-6-5-4 6-.4z"/>
+    <path d="M176 171l2 5 6 .4-5 4 2 6-5-3-5 3 2-6-5-4 6-.4z"/>
+  </g>
+</svg>

@@ -1,0 +1,4 @@
+[client]
+user=ecotrack_backup
+password=REPLACE_WITH_A_LONG_RANDOM_BACKUP_PASSWORD
+host=127.0.0.1

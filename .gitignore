@@ -1,0 +1,28 @@
+# Environment and credentials
+.env
+.env.*
+!.env.example
+config.local.php
+
+# User-generated files and local database exports
+/uploads/*
+!/uploads/.htaccess
+!/uploads/users/
+/uploads/users/*
+!/uploads/users/.gitkeep
+/admin_profile.jpg
+/backups/
+/.local/
+/.tmp/
+/Total
+*.dump
+*.sql.gz
+*_backup.sql
+*_dump.sql
+
+# Logs and editor files
+*.log
+/.vscode/
+/.idea/
+Thumbs.db
+Desktop.ini

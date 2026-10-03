@@ -1,0 +1,701 @@
+/* Collection Scheduling DSS layout. Kept separate from the shared theme so
+   its responsive rules do not leak into other admin pages. */
+.dss-page {
+  min-width: 320px;
+}
+
+.dss-page .main-content {
+  max-width: none;
+  padding: 28px !important;
+}
+
+.dss-page__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
+.dss-page__header .header-icons {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+}
+
+.dss-page__header .page-kicker {
+  margin: 7px 0 0;
+}
+
+.dss-toolbar,
+.dss-card,
+.method-card,
+.dss-preview__screen {
+  background: var(--eco-surface);
+  border: 1px solid var(--eco-border);
+  border-radius: 12px;
+  box-shadow: var(--eco-shadow);
+}
+
+.dss-toolbar {
+  display: grid;
+  /* Keep the timeframe choices at the left, followed by the collection group. */
+  grid-template-columns: minmax(390px, 1.65fr) minmax(190px, 0.75fr) auto;
+  align-items: end;
+  gap: 16px;
+  margin-bottom: 18px;
+  padding: 20px;
+}
+
+.dss-toolbar .filter-field {
+  min-width: 0;
+}
+
+.dss-toolbar .filter-field label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--eco-text-soft);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dss-toolbar .filter-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  border: 1px solid var(--eco-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--eco-text);
+}
+
+.dss-period-filter {
+  min-width: 0;
+}
+
+.filter-field__label {
+  display: block;
+  margin-bottom: 7px;
+  color: var(--eco-text-soft);
+  font-size: 12px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.dss-mode-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.dss-mode-option {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 9px;
+  border: 1px solid var(--eco-border);
+  border-radius: 7px;
+  color: var(--eco-text-soft);
+  background: var(--eco-surface-soft);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.dss-mode-option.is-selected {
+  border-color: var(--eco-primary-action);
+  color: var(--eco-primary-strong);
+  background: var(--eco-primary-soft);
+}
+
+.dss-mode-option input {
+  margin: 0;
+}
+
+.dss-mode-panel[hidden] {
+  display: none;
+}
+
+.dss-date-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dss-date-field {
+  min-width: 0;
+}
+
+.dss-date-field label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--eco-text-soft);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.dss-date-field input,
+.dss-date-field select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  border: 1px solid var(--eco-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--eco-text);
+  font: inherit;
+}
+
+.dss-toolbar__actions {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+}
+
+.dss-toolbar__actions .btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  min-inline-size: 112px;
+  padding-inline: 16px;
+  white-space: nowrap;
+}
+
+.dss-toolbar__actions .btn-gray {
+  min-inline-size: 76px;
+}
+
+.dss-toolbar__actions .btn-green {
+  background: var(--eco-primary-action);
+  color: var(--eco-on-primary);
+}
+
+.dss-toolbar__actions .btn-gray {
+  background: var(--eco-surface-soft);
+  color: var(--eco-text);
+  border: 1px solid var(--eco-border);
+}
+
+.dss-toolbar__actions .btn-green:hover,
+.dss-toolbar__actions .btn-green:focus-visible {
+  background: var(--eco-primary-action-hover);
+}
+
+.dss-toolbar__actions .btn-gray:hover,
+.dss-toolbar__actions .btn-gray:focus-visible {
+  background: var(--eco-primary-soft);
+}
+
+.scope {
+  margin: 0 0 18px;
+  color: var(--eco-text-soft);
+  font-size: 13px;
+}
+
+.scope strong {
+  color: var(--eco-text);
+}
+
+.dss-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px 16px;
+  margin: 0 0 18px;
+  padding: 14px 16px;
+  border: 1px solid var(--eco-border);
+  border-radius: 10px;
+  background: var(--eco-surface);
+  color: var(--eco-text-soft);
+  font-size: 13px;
+}
+
+.dss-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.dss-legend__item strong {
+  color: var(--eco-text);
+}
+
+.dss-legend__swatch {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 12px;
+  border-radius: 3px;
+  box-shadow: inset 0 0 0 1px rgb(0 0 0 / 12%);
+}
+
+.dss-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 16px;
+}
+
+.dss-card {
+  display: flex;
+  min-width: 0;
+  min-height: 100%;
+  padding: 20px;
+  border-top: 5px solid var(--dss-color);
+  flex-direction: column;
+}
+
+.dss-card__header {
+  min-height: 65px;
+}
+
+.dss-rank {
+  display: block;
+  color: var(--eco-text-soft);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.dss-card h2 {
+  margin: 7px 0 0;
+  color: var(--eco-text);
+  font-size: 21px;
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+.dss-card__details {
+  display: grid;
+  gap: 10px;
+  margin: 14px 0 0;
+}
+
+.dss-card__detail {
+  margin: 0;
+  color: var(--eco-text-soft);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.dss-card__detail strong {
+  color: var(--eco-text);
+}
+
+.dss-card__detail--reason {
+  margin-top: auto;
+  padding-top: 12px;
+  border-top: 1px solid var(--eco-border);
+}
+
+.method-card {
+  margin-top: 20px;
+  padding: 20px;
+}
+
+.method-card h2 {
+  margin: 0 0 10px;
+  color: var(--eco-text);
+  font-size: 18px;
+}
+
+.method-card ul {
+  margin: 10px 0 0 20px;
+  color: var(--eco-text-soft);
+  line-height: 1.6;
+}
+
+.dss-page .empty-state,
+.dss-page .message {
+  padding: 30px;
+  border: 1px solid var(--eco-border);
+  border-radius: 12px;
+  background: var(--eco-surface);
+  color: var(--eco-text-soft);
+  text-align: center;
+}
+
+.dss-page .empty-state strong {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--eco-text);
+}
+
+.dss-page .message.error {
+  border-color: color-mix(in srgb, var(--eco-danger-text) 34%, transparent);
+  background: var(--eco-danger-surface);
+  color: var(--eco-danger-text);
+}
+
+/* The compact breakpoint deliberately happens before cards become cramped.
+   This matches the practical width left after the persistent desktop sidebar. */
+@media (max-width: 1200px) {
+  .dss-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dss-toolbar__actions {
+    justify-self: start;
+  }
+
+  .dss-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 899px) {
+  .dss-page .main-content {
+    padding: 72px 18px 20px !important;
+  }
+}
+
+@media (max-width: 640px) {
+  .dss-page .main-content {
+    padding: 68px 12px 16px !important;
+  }
+
+  .dss-toolbar,
+  .method-card,
+  .dss-card {
+    padding: 16px;
+  }
+
+  .dss-toolbar__actions {
+    flex-direction: column;
+    align-items: stretch;
+    width: 100%;
+  }
+
+  .dss-toolbar__actions .btn {
+    width: 100%;
+  }
+
+  .dss-date-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .dss-legend {
+    display: grid;
+  }
+
+  .dss-card__header {
+    min-height: 0;
+  }
+}
+
+/* Fixed-data visual comparison page. Each screen is intentionally isolated
+   from the real page sidebar so both responsive states can be inspected. */
+.dss-preview-page {
+  min-width: 320px;
+  margin: 0;
+  background: var(--eco-bg);
+  color: var(--eco-text);
+}
+
+.dss-preview {
+  width: min(1680px, 100%);
+  margin: 0 auto;
+  padding: 32px;
+}
+
+.dss-preview__heading {
+  margin-bottom: 24px;
+}
+
+.dss-preview__eyebrow {
+  margin: 0 0 5px;
+  color: var(--eco-primary-strong);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.dss-preview__heading h1 {
+  margin: 0;
+  color: var(--eco-text);
+}
+
+.dss-preview__heading p:last-child {
+  max-width: 720px;
+  margin: 8px 0 0;
+  color: var(--eco-text-soft);
+}
+
+.dss-preview__screens {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(420px, 0.9fr);
+  gap: 24px;
+  align-items: start;
+}
+
+.dss-preview__panel {
+  min-width: 0;
+}
+
+.dss-preview__panel-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 9px;
+  color: var(--eco-text);
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.dss-preview__panel-label::before {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--eco-primary);
+  content: "";
+}
+
+.dss-preview__screen {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  min-height: 670px;
+  overflow: hidden;
+}
+
+.dss-preview__sidebar {
+  display: flex;
+  padding: 18px 12px;
+  background: var(--eco-sidebar);
+  color: var(--eco-sidebar-nav-text);
+  flex-direction: column;
+}
+
+.dss-preview__brand {
+  padding: 0 5px 18px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.18);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1.25;
+}
+
+.dss-preview__brand span {
+  display: block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  opacity: 0.82;
+}
+
+.dss-preview__nav {
+  display: grid;
+  gap: 6px;
+  margin-top: 16px;
+}
+
+.dss-preview__nav span {
+  display: block;
+  padding: 8px 9px;
+  border-radius: 7px;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.dss-preview__nav .is-active {
+  background: var(--eco-sidebar-nav-active-surface);
+  color: var(--eco-sidebar-nav-active-text);
+}
+
+.dss-preview__content {
+  min-width: 0;
+  padding: 20px;
+  background: var(--eco-bg);
+}
+
+.dss-preview__content-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.dss-preview__content-header h2 {
+  margin: 0;
+  color: var(--eco-text);
+  font-size: clamp(16px, 2vw, 21px);
+  line-height: 1.2;
+}
+
+.dss-preview__content-header p {
+  margin: 5px 0 0;
+  color: var(--eco-text-soft);
+  font-size: 11px;
+}
+
+.dss-preview__status {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--eco-border);
+  border-radius: 8px;
+  background: var(--eco-surface);
+}
+
+.dss-preview .dss-toolbar {
+  gap: 11px;
+  margin-bottom: 12px;
+  padding: 14px;
+}
+
+.dss-preview .dss-toolbar .filter-field label {
+  font-size: 10px;
+}
+
+.dss-preview .dss-toolbar .filter-field select,
+.dss-preview .dss-toolbar__actions .btn {
+  min-height: 36px;
+  font-size: 11px;
+}
+
+.dss-preview .dss-toolbar__actions {
+  gap: 6px;
+}
+
+.dss-preview .scope {
+  margin-bottom: 12px;
+  font-size: 11px;
+}
+
+.dss-preview .dss-grid {
+  gap: 11px;
+}
+
+.dss-preview .dss-card {
+  padding: 14px;
+}
+
+.dss-preview .dss-card__header {
+  min-height: 50px;
+}
+
+.dss-preview .dss-rank {
+  font-size: 10px;
+}
+
+.dss-preview .dss-card h2 {
+  font-size: 15px;
+}
+
+.dss-preview .dss-card__details {
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.dss-preview .dss-card__detail {
+  font-size: 11px;
+}
+
+.dss-preview .dss-card__detail--reason {
+  padding-top: 8px;
+}
+
+.dss-preview .method-card {
+  margin-top: 12px;
+  padding: 14px;
+}
+
+.dss-preview .method-card h2 {
+  font-size: 14px;
+}
+
+.dss-preview .method-card ul {
+  margin: 7px 0 0 16px;
+  font-size: 11px;
+}
+
+.dss-preview__screen--compact {
+  grid-template-columns: 96px minmax(0, 1fr);
+}
+
+.dss-preview__screen--compact .dss-preview__sidebar {
+  padding-inline: 8px;
+}
+
+.dss-preview__screen--compact .dss-preview__brand {
+  padding-inline: 2px;
+  font-size: 12px;
+}
+
+.dss-preview__screen--compact .dss-preview__nav span {
+  padding: 8px 6px;
+  font-size: 10px;
+}
+
+.dss-preview__screen--compact .dss-preview__content {
+  padding: 14px;
+}
+
+.dss-preview__screen--compact .dss-toolbar,
+.dss-preview__screen--compact .dss-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.dss-preview__screen--compact .dss-toolbar__actions {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.dss-preview__screen--compact .dss-toolbar__actions .btn {
+  width: 100%;
+}
+
+.dss-preview__screen--compact .dss-card__header {
+  min-height: 0;
+}
+
+@media (max-width: 1180px) {
+  .dss-preview__screens {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .dss-preview__screen--desktop {
+    max-width: none;
+  }
+
+  .dss-preview__screen--compact {
+    max-width: 560px;
+  }
+}
+
+@media (max-width: 640px) {
+  .dss-preview {
+    padding: 16px 12px;
+  }
+
+  .dss-preview__screen,
+  .dss-preview__screen--compact {
+    grid-template-columns: 76px minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .dss-preview__sidebar {
+    padding-inline: 6px;
+  }
+
+  .dss-preview__brand {
+    font-size: 10px;
+    overflow-wrap: anywhere;
+  }
+
+  .dss-preview__nav span {
+    padding-inline: 5px;
+    font-size: 9px;
+    overflow-wrap: anywhere;
+  }
+
+  .dss-preview__content {
+    padding: 12px;
+  }
+}
