@@ -1,30 +1,15 @@
 <?php
-
-require _DIR_ . '/config.php';
+require 'config.php';
 
 $conn = getDBConnection();
 
-$files = [
-    _DIR_ . '/database_setup.sql',
-    _DIR_ . '/waste_data_corrected.sql',
-];
+$files = ['database_setup.sql', 'waste_data_corrected.sql'];
 
 foreach ($files as $file) {
-    if (!is_readable($file)) {
-        die("FILE_NOT_READABLE: " . basename($file));
-    }
-
-    echo "Running " . basename($file) . "...\n";
-
+    echo "Running " . $file . "...\n";
     $sql = file_get_contents($file);
-
-    if ($sql === false) {
-        die("FILE_READ_FAILED: " . basename($file));
-    }
-
     $conn->exec($sql);
-
-    echo "OK: " . basename($file) . "\n";
+    echo "OK: " . $file . "\n";
 }
 
 echo "DATABASE_SETUP_COMPLETE\n";
