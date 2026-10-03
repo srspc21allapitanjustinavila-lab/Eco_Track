@@ -1,10 +1,14 @@
-FROM dunglas/frankenphp:php8.4
+FROM php:8.2-apache
 
-# Set the server name to listen on the dynamic port assigned by Railway
-ENV SERVER_NAME=":${PORT}"
+# I-enable ang Apache Rewrite module (para kung may .htaccess ka)
+RUN a2enmod rewrite
 
-RUN install-php-extensions mysqli
+# I-install ang MySQL extensions na kailangan ng database mo
+RUN docker-php-ext-install mysqli pdo pdo_mysql
 
-COPY . /app
+# Kopyahin ang lahat ng files mo papunta sa default folder ng Apache
+COPY . /var/www/html/
 
-WORKDIR /app
+# I-configure ang Apache para makinig sa dynamic PORT na ibinibigay ng Railway
+RUN sed -i 's/Listen 80/Listen ${PORT}/' /etc/apache2/ports.conf
+RUN sed -i 's/<VirtualHost \*:80>/<VirtualHost \*:${PORT}>/' /etc/apache2/sites-available/000-default.conf
