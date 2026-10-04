@@ -641,12 +641,17 @@ textarea::placeholder {
   }
 }
 
-input,
+input:not([type="checkbox"]):not([type="radio"]),
 select,
 textarea {
   background: var(--input-bg) !important;
   border-color: var(--input-border) !important;
   color: var(--eco-text) !important;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--eco-primary);
 }
 
 input:focus,
@@ -1855,7 +1860,7 @@ h1 {
   font-weight: 750 !important;
 }
 
-.form-group input,
+.form-group input:not([type="checkbox"]):not([type="radio"]),
 .form-group select,
 .form-group textarea,
 .select-group select {

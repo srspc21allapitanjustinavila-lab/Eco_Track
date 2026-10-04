@@ -561,7 +561,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
           }
         }
     </style>
-    <link rel="stylesheet" href="assets/css/ecotrack-theme.css">
+    <link rel="stylesheet" href="assets/css/ecotrack-theme.css?v=<?php echo filemtime(__DIR__ . '/assets/css/ecotrack-theme.css'); ?>">
 </head>
 <body>
     <div class="login-container">
