@@ -19,6 +19,7 @@ $verification = file_get_contents(__DIR__ . '/../password_reset_verification.php
 $userManagement = file_get_contents(__DIR__ . '/../user_management.php');
 $uploadRules = file_get_contents(__DIR__ . '/../uploads/.htaccess');
 $gitignore = file_get_contents(__DIR__ . '/../.gitignore');
+$envExample = file_get_contents(__DIR__ . '/../.env.example');
 $schema = file_get_contents(__DIR__ . '/../database_setup.sql');
 
 checkDeploymentConfiguration(
@@ -28,7 +29,9 @@ checkDeploymentConfiguration(
     'Database, mail, and AI settings are read from the environment.'
 );
 checkDeploymentConfiguration(
-    PASSWORD_RESET_ENABLED === false && !isPasswordResetEnabled(),
+    str_contains($envExample, 'PASSWORD_RESET_ENABLED=false')
+    && str_contains($config, "define('PASSWORD_RESET_ENABLED', environmentBoolean('PASSWORD_RESET_ENABLED', false))")
+    && str_contains($config, 'return PASSWORD_RESET_ENABLED && isSmtpConfigured();'),
     'Password reset is disabled by default until SMTP is configured.'
 );
 checkDeploymentConfiguration(

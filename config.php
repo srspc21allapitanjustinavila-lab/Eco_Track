@@ -6,6 +6,50 @@ function environmentValue($name, $default = '')
     return $value === false || $value === '' ? $default : $value;
 }
 
+function loadLocalEnvironment($path)
+{
+    if (!is_readable($path)) {
+        return;
+    }
+
+    $lines = file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+    if ($lines === false) {
+        return;
+    }
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if ($line === '' || strpos($line, '#') === 0) {
+            continue;
+        }
+
+        if (strpos($line, 'export ') === 0) {
+            $line = trim(substr($line, 7));
+        }
+
+        [$name, $value] = array_pad(explode('=', $line, 2), 2, '');
+        $name = trim($name);
+        if (!preg_match('/^[A-Za-z_][A-Za-z0-9_]*$/', $name)) {
+            continue;
+        }
+
+        $existing = getenv($name);
+        if ($existing !== false && $existing !== '') {
+            continue;
+        }
+
+        $value = trim($value);
+        $quote = $value[0] ?? '';
+        if (($quote === '"' || $quote === "'") && substr($value, -1) === $quote) {
+            $value = substr($value, 1, -1);
+        }
+
+        putenv($name . '=' . $value);
+        $_ENV[$name] = $value;
+        $_SERVER[$name] = $_SERVER[$name] ?? $value;
+    }
+}
+
 function environmentBoolean($name, $default = false)
 {
     $value = getenv($name);
@@ -15,6 +59,8 @@ function environmentBoolean($name, $default = false)
 
     return filter_var($value, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE) ?? $default;
 }
+
+loadLocalEnvironment(__DIR__ . '/.env');
 
 // Database configuration
 define('APP_ENV', environmentValue('APP_ENV', 'development'));
