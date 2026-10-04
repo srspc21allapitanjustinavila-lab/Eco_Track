@@ -651,7 +651,18 @@ textarea {
 
 input[type="checkbox"],
 input[type="radio"] {
-  accent-color: var(--eco-primary);
+  accent-color: #8bc34a;
+}
+
+input[type="checkbox"]:focus,
+input[type="radio"]:focus {
+  box-shadow: none;
+}
+
+input[type="checkbox"]:focus-visible,
+input[type="radio"]:focus-visible {
+  outline: 3px solid rgba(47, 125, 79, 0.28);
+  outline-offset: 2px;
 }
 
 input:focus,
