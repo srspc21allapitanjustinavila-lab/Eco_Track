@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS waste_import_batch_files (
 
 CREATE TABLE IF NOT EXISTS waste_import_staging_rows (
     batch_id CHAR(36) NOT NULL,
-    row_number INT NOT NULL,
+    `row_number` INT NOT NULL,
     source_file_sha256 CHAR(64) NOT NULL,
     record_fingerprint CHAR(64) NOT NULL,
     date VARCHAR(50) NOT NULL,
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS waste_import_staging_rows (
     saturday_hazard_waste_kg DECIMAL(10,2) NOT NULL DEFAULT 0,
     residual_waste_kg DECIMAL(10,2) NOT NULL DEFAULT 0,
     unclassified_waste_kg DECIMAL(10,2) NOT NULL DEFAULT 0,
-    PRIMARY KEY (batch_id, row_number),
+    PRIMARY KEY (batch_id, `row_number`),
     UNIQUE KEY unique_waste_import_staging_fingerprint (batch_id, record_fingerprint),
     INDEX idx_waste_import_staging_fingerprint (record_fingerprint)
 );
