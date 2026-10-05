@@ -18,6 +18,7 @@ $username = $_SESSION['user']['username'] ?? 'User';
 $conn = getDBConnection();
 $error = '';
 $success = '';
+$exportDownloadSuccessCookie = 'ecotrack_waste_export_downloaded';
 ensureWasteFormatColumns($conn);
 ensureWasteRecordsArchiveTable($conn);
 ensureWasteAnalyticsColumns($conn);
@@ -452,6 +453,13 @@ if ($export_format !== '' && $export_format !== 'excel') {
             if (ob_get_length()) {
                 ob_clean();
             }
+            setcookie($exportDownloadSuccessCookie, '1', [
+                'expires' => time() + 60,
+                'path' => '/',
+                'secure' => isHttpsRequest(),
+                'httponly' => false,
+                'samesite' => 'Lax',
+            ]);
             header('Content-Type: application/vnd.ms-excel; charset=utf-8');
             header('Content-Disposition: attachment; filename="' . $filename . '.xls"');
             header('Content-Length: ' . strlen($excel));
@@ -1359,6 +1367,8 @@ include 'includes/sidebar.php'; ?>
         $otpModalSubmitLabel = 'Verify and download';
         $otpModalCancelHref = $wasteRecordsRoute . '?' . http_build_query($paginationParams);
         $otpModalCancelLabel = 'Cancel download';
+        $otpModalSuccessCookie = $exportDownloadSuccessCookie;
+        $otpModalSuccessMessage = 'Successfully downloaded.';
         $otpModalHiddenInputs = array_filter([
             'export' => $export_format,
             'waste_type' => $wasteTypeFilter,
