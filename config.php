@@ -76,6 +76,15 @@ define('EMAIL_USERNAME', environmentValue('EMAIL_USERNAME'));
 define('EMAIL_PASSWORD', environmentValue('EMAIL_PASSWORD'));
 define('EMAIL_FROM', environmentValue('EMAIL_FROM'));
 define('EMAIL_FROM_NAME', environmentValue('EMAIL_FROM_NAME', 'EcoTrack System'));
+
+// Gmail API configuration
+define('GMAIL_API_ENABLED', environmentBoolean('GMAIL_API_ENABLED', false));
+define('GOOGLE_CLIENT_ID', environmentValue('GOOGLE_CLIENT_ID'));
+define('GOOGLE_CLIENT_SECRET', environmentValue('GOOGLE_CLIENT_SECRET'));
+define('GOOGLE_REFRESH_TOKEN', environmentValue('GOOGLE_REFRESH_TOKEN'));
+define('GMAIL_FROM', environmentValue('GMAIL_FROM'));
+define('GMAIL_FROM_NAME', environmentValue('GMAIL_FROM_NAME', 'EcoTrack System'));
+
 define('OPENAI_API_KEY', environmentValue('OPENAI_API_KEY'));
 define('OPENAI_MODEL', environmentValue('OPENAI_MODEL', 'gpt-4o-mini'));
 define('PASSWORD_RESET_ENABLED', environmentBoolean('PASSWORD_RESET_ENABLED', false));
@@ -87,6 +96,15 @@ function isSmtpConfigured()
         && EMAIL_USERNAME !== ''
         && EMAIL_PASSWORD !== ''
         && EMAIL_FROM !== '';
+}
+
+function isGmailApiConfigured()
+{
+    return GMAIL_API_ENABLED
+        && GOOGLE_CLIENT_ID !== ''
+        && GOOGLE_CLIENT_SECRET !== ''
+        && GOOGLE_REFRESH_TOKEN !== ''
+        && GMAIL_FROM !== '';
 }
 
 function isPasswordResetEnabled()
@@ -1458,7 +1476,15 @@ function canUseActionOtp($conn, $userId, $purpose)
 function sendActionOtpEmail(array $user, $code, $purpose)
 {
     $email = trim((string)($user['email'] ?? ''));
-    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || !isSupportedActionOtpPurpose($purpose) || !isSmtpConfigured()) {
+    if ($email === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || !isSupportedActionOtpPurpose($purpose)) {
+        return false;
+    }
+
+    if (isGmailApiConfigured()) {
+        return sendActionOtpEmailViaGmailApi($user, $code, $purpose);
+    }
+
+    if (!isSmtpConfigured()) {
         return false;
     }
 
@@ -1501,6 +1527,22 @@ function sendActionOtpEmail(array $user, $code, $purpose)
         error_log('Data-export OTP email error: ' . $e->getMessage());
         return false;
     }
+}
+
+function sendActionOtpEmailViaGmailApi(array $user, $code, $purpose)
+{
+    $email = trim((string)($user['email'] ?? ''));
+    $actionLabel = actionOtpLabel($purpose);
+    $displayName = trim((string)($user['first_name'] ?? '') . ' ' . (string)($user['last_name'] ?? ''));
+    if ($displayName === '') {
+        $displayName = (string)($user['username'] ?? 'EcoTrack user');
+    }
+    $safeName = htmlspecialchars($displayName, ENT_QUOTES, 'UTF-8');
+    $htmlBody = '<p>Hello ' . $safeName . ',</p><p>Your EcoTrack verification code for this ' . htmlspecialchars($actionLabel, ENT_QUOTES, 'UTF-8') . ' is:</p><p style="font-size:28px;font-weight:700;letter-spacing:6px;">' . $code . '</p><p>This code expires in 5 minutes and authorizes one ' . htmlspecialchars($actionLabel, ENT_QUOTES, 'UTF-8') . '. If you did not request it, you can ignore this email.</p>';
+    $altBody = 'Your EcoTrack verification code for this ' . $actionLabel . ' is ' . $code . '. It expires in 5 minutes and authorizes one action.';
+
+    require_once __DIR__ . '/includes/gmail_api_mailer.php';
+    return \GmailApiMailer::send($email, 'EcoTrack verification code', $htmlBody, $altBody);
 }
 
 /** Send a purpose-scoped code and invalidate only older codes for that purpose. */

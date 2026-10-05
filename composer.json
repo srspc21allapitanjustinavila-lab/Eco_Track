@@ -1,0 +1,21 @@
+{
+    "name": "ecotrack/ecotrack",
+    "description": "EcoTrack - Waste Data Management System",
+    "type": "project",
+    "require": {
+        "google/apiclient": "^2.15"
+    },
+    "config": {
+        "optimize-autoloader": true,
+        "platform": {
+            "php": "8.0.30"
+        }
+    },
+    "policy": {
+        "advisories": {
+            "ignore-id": [
+                "PKSA-y2cr-5h3j-g3ys"
+            ]
+        }
+    }
+}
