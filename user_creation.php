@@ -342,7 +342,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
                 <div class="form-grid">
                     <div class="form-group">
                         <label for="password">Password:</label>
-                        <input type="password" id="password" name="password" required>
+                        <div style="display:flex; gap:8px;"><input type="password" id="password" name="password" required><button type="button" class="btn-secondary" data-password-toggle="password">Show</button></div>
                         <div class="password-requirements">
                             <h4>Password Requirements:</h4>
                             <ul>
@@ -355,7 +355,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
 
                     <div class="form-group">
                         <label for="confirm_password">Confirm Password:</label>
-                        <input type="password" id="confirm_password" name="confirm_password" required>
+                        <div style="display:flex; gap:8px;"><input type="password" id="confirm_password" name="confirm_password" required><button type="button" class="btn-secondary" data-password-toggle="confirm_password">Show</button></div>
                     </div>
                 </div>
 
@@ -367,5 +367,15 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         </div>
     </div>
     <?php include 'includes/transaction_confirmation_modal.php'; ?>
+    <script>
+      document.querySelectorAll('[data-password-toggle]').forEach((button) => {
+        button.addEventListener('click', () => {
+          const input = document.getElementById(button.dataset.passwordToggle);
+          if (!input) return;
+          input.type = input.type === 'password' ? 'text' : 'password';
+          button.textContent = input.type === 'password' ? 'Show' : 'Hide';
+        });
+      });
+    </script>
 </body>
 </html>

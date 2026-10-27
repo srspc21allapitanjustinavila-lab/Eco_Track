@@ -38,8 +38,11 @@
     return String(parts.year) + "-" + pad(parts.month + 1) + (type === "month" ? "" : "-" + pad(parts.day));
   }
 
-  function displayValue(parts, type) {
-    return type === "month" ? MONTHS[parts.month] + " " + parts.year : MONTHS[parts.month] + " " + parts.day + ", " + parts.year;
+  function displayValue(parts, type, numericDate) {
+    if (type === "month") return MONTHS[parts.month] + " " + parts.year;
+    return numericDate
+      ? pad(parts.month + 1) + "/" + pad(parts.day) + "/" + parts.year
+      : MONTHS[parts.month] + " " + parts.day + ", " + parts.year;
   }
 
   function parseJson(value, fallback) {
@@ -82,6 +85,24 @@
     return monthsByYear;
   }
 
+  function availableDatesByMonth(input) {
+    var rawDates = parseJson(input.dataset.calendarDates, {});
+    var datesByMonth = {};
+    if (!rawDates || typeof rawDates !== "object" || Array.isArray(rawDates)) return datesByMonth;
+    Object.keys(rawDates).forEach(function (period) {
+      if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(period) || !Array.isArray(rawDates[period])) return;
+      var seen = {};
+      var dates = rawDates[period].filter(function (value) {
+        if (typeof value !== "string" || !/^\d{4}-(0[1-9]|1[0-2])-([0-2]\d|3[01])$/.test(value) || seen[value]) return false;
+        seen[value] = true;
+        return true;
+      });
+      dates.sort();
+      datesByMonth[period] = dates;
+    });
+    return datesByMonth;
+  }
+
   function yearSelect(years, selectedYear, includeAllYears) {
     var select = document.createElement("select");
     select.className = "year-picker-year";
@@ -103,11 +124,12 @@
     return select;
   }
 
-  function monthSelect(selectedMonth) {
+  function monthSelect(selectedMonth, availableMonths) {
     var select = document.createElement("select");
     select.className = "year-picker-month";
     select.setAttribute("aria-label", "Calendar month");
     MONTHS.forEach(function (monthName, month) {
+      if (availableMonths.indexOf(month + 1) === -1) return;
       var option = document.createElement("option");
       option.value = String(month);
       option.textContent = monthName;
@@ -209,7 +231,11 @@
       type: type,
       years: years,
       hasImportedYears: years.length > 0,
+      hasImportedMonths: input.hasAttribute("data-calendar-months"),
       monthsByYear: availableMonthsByYear(input),
+      hasImportedDates: input.hasAttribute("data-calendar-dates"),
+      datesByMonth: availableDatesByMonth(input),
+      numericDate: input.dataset.yearPickerDateDisplay === "numeric",
       externalYear: externalYear,
       combinedPeriod: combinedPeriod,
       allowEmpty: allowEmpty,
@@ -262,13 +288,24 @@
     }
 
     function availableMonthsForYear(year) {
+      if (!state.hasImportedMonths) return MONTHS.map(function (_, month) { return month + 1; });
       var months = state.monthsByYear[String(year)];
       return Array.isArray(months) ? months : [];
     }
 
     function monthIsAvailableForYear(year, month) {
       var months = availableMonthsForYear(year);
-      return months.length === 0 || months.indexOf(month + 1) !== -1;
+      return months.indexOf(month + 1) !== -1;
+    }
+
+    function dateIsAvailable(year, month, day) {
+      var value = String(year) + "-" + pad(month + 1) + "-" + pad(day);
+      var minimum = state.input.dataset.yearPickerMinDate || "";
+      var maximum = state.input.dataset.yearPickerMaxDate || "";
+      if ((minimum && value < minimum) || (maximum && value > maximum)) return false;
+      if (!state.hasImportedDates) return true;
+      var dates = state.datesByMonth[String(year) + "-" + pad(month + 1)] || [];
+      return dates.indexOf(value) !== -1;
     }
 
     function allYearsAreSelected() {
@@ -278,25 +315,20 @@
     function availableMonthsForAllYears() {
       var seen = {};
       var months = [];
-      var unrestrictedYear = false;
       state.years.forEach(function (year) {
         var availableMonths = availableMonthsForYear(year);
-        if (availableMonths.length === 0) {
-          unrestrictedYear = true;
-          return;
-        }
         availableMonths.forEach(function (month) {
           if (seen[month]) return;
           seen[month] = true;
           months.push(month);
         });
       });
-      return unrestrictedYear ? [] : months;
+      return months;
     }
 
     function monthIsAvailable(year, month) {
       var months = allYearsAreSelected() ? availableMonthsForAllYears() : availableMonthsForYear(year);
-      return months.length === 0 || months.indexOf(month + 1) !== -1;
+      return months.indexOf(month + 1) !== -1;
     }
 
     function firstAvailableYearForMonth(month) {
@@ -384,6 +416,20 @@
       return true;
     }
 
+    function adjacentDateMonth(direction) {
+      var currentPeriod = state.viewYear * 12 + state.viewMonth;
+      var target = null;
+      state.years.forEach(function (year) {
+        availableMonthsForYear(year).forEach(function (month) {
+          var period = year * 12 + month - 1;
+          if (direction < 0 ? period >= currentPeriod : period <= currentPeriod) return;
+          if (target && (direction < 0 ? period <= target.period : period >= target.period)) return;
+          target = { year: year, month: month - 1, period: period };
+        });
+      });
+      return target;
+    }
+
     function changeView(direction) {
       if (type === "month") {
         if (!changeYear(direction)) {
@@ -395,14 +441,10 @@
           return;
         }
       } else {
-        var date = new Date(state.viewYear, state.viewMonth + direction, 1);
-        if (state.years.indexOf(date.getFullYear()) !== -1) {
-          state.viewYear = date.getFullYear();
-          state.viewMonth = date.getMonth();
-        } else if (direction < 0 && changeYear(-1)) {
-          state.viewMonth = 11;
-        } else if (direction > 0 && changeYear(1)) {
-          state.viewMonth = 0;
+        var adjacentMonth = adjacentDateMonth(direction);
+        if (adjacentMonth) {
+          state.viewYear = adjacentMonth.year;
+          state.viewMonth = adjacentMonth.month;
         }
       }
       render();
@@ -416,7 +458,7 @@
           var monthButton = button(monthName.slice(0, 3), "", monthName);
           var available = monthIsAvailable(state.viewYear, month);
           monthButton.disabled = !available;
-          if (!state.isEmpty && state.selected.year === state.viewYear && state.selected.month === month)
+          if (available && !state.isEmpty && state.selected.year === state.viewYear && state.selected.month === month)
             monthButton.classList.add("is-selected");
           monthButton.addEventListener("click", function () {
             if (!available) return;
@@ -433,6 +475,7 @@
       }
 
       state.grid.className = "year-picker-grid days";
+      if (!monthIsAvailableForYear(state.viewYear, state.viewMonth)) return;
       var firstDay = new Date(state.viewYear, state.viewMonth, 1).getDay();
       var daysInMonth = new Date(state.viewYear, state.viewMonth + 1, 0).getDate();
       for (var blank = 0; blank < firstDay; blank++) {
@@ -443,9 +486,16 @@
       for (var day = 1; day <= daysInMonth; day++) {
         (function (dayValue) {
           var dayButton = button(String(dayValue), "", MONTHS[state.viewMonth] + " " + dayValue + ", " + state.viewYear);
-          if (!state.isEmpty && state.selected.year === state.viewYear && state.selected.month === state.viewMonth && state.selected.day === dayValue)
+          var available = dateIsAvailable(state.viewYear, state.viewMonth, dayValue);
+          dayButton.disabled = !available;
+          if (available && !state.isEmpty && state.selected.year === state.viewYear && state.selected.month === state.viewMonth && state.selected.day === dayValue)
             dayButton.classList.add("is-selected");
+          if (input.dataset.yearPickerToday === canonical({ year: state.viewYear, month: state.viewMonth, day: dayValue }, "date")) {
+            dayButton.classList.add("is-today");
+            dayButton.setAttribute("aria-current", "date");
+          }
           dayButton.addEventListener("click", function () {
+            if (!available) return;
             updateValue({ year: state.viewYear, month: state.viewMonth, day: dayValue }, true);
             close(true);
           });
@@ -463,7 +513,7 @@
             ? input.dataset.yearPickerPlaceholder || "Select a value"
             : state.externalYear && type === "month" && !state.combinedPeriod
               ? MONTHS[state.selected.month]
-              : displayValue(state.selected, type);
+              : displayValue(state.selected, type, state.numericDate);
       state.trigger.disabled = input.disabled || !state.hasImportedYears || (state.externalYear && !state.combinedPeriod && !externalYearValue());
       if (input.disabled) close(false);
       if (!state.grid) return;
@@ -471,11 +521,18 @@
       if (state.year) {
         state.year.value = state.combinedPeriod && state.isEmpty && !state.hasYearOnly ? "" : String(state.viewYear);
       }
-      if (state.month) state.month.value = String(state.viewMonth);
+      if (state.month) {
+        var availableMonths = availableMonthsForYear(state.viewYear);
+        if (availableMonths.length && availableMonths.indexOf(state.viewMonth + 1) === -1) state.viewMonth = availableMonths[0] - 1;
+        var updatedMonths = monthSelect(state.viewMonth, availableMonths);
+        state.month.replaceChildren();
+        while (updatedMonths.firstChild) state.month.appendChild(updatedMonths.firstChild);
+        state.month.disabled = availableMonths.length === 0;
+      }
       if (state.previous) {
         var yearIndex = state.years.indexOf(state.viewYear);
-        state.previous.disabled = type === "month" ? yearIndex === state.years.length - 1 : yearIndex === state.years.length - 1 && state.viewMonth === 0;
-        state.next.disabled = type === "month" ? yearIndex === 0 : yearIndex === 0 && state.viewMonth === 11;
+        state.previous.disabled = type === "month" ? yearIndex === state.years.length - 1 : !adjacentDateMonth(-1);
+        state.next.disabled = type === "month" ? yearIndex === 0 : !adjacentDateMonth(1);
       }
       state.caption.textContent = type === "month"
         ? state.combinedPeriod
@@ -495,7 +552,7 @@
       header.className = "year-picker-header";
       state.previous = button("\u2039", "year-picker-nav", type === "month" ? "Previous year" : "Previous month");
       state.year = yearSelect(state.years, state.viewYear, state.combinedPeriod);
-      if (type === "date") state.month = monthSelect(state.viewMonth);
+      if (type === "date") state.month = monthSelect(state.viewMonth, availableMonthsForYear(state.viewYear));
       state.next = button("\u203a", "year-picker-nav", type === "month" ? "Next year" : "Next month");
       state.previous.addEventListener("click", function () { changeView(-1); });
       state.next.addEventListener("click", function () { changeView(1); });
@@ -531,6 +588,14 @@
     state.caption.className = "year-picker-caption";
     state.grid = document.createElement("div");
     state.popover.append(state.caption, state.grid);
+    if (type === "date" && allowEmpty) {
+      var clearButton = button("Clear date", "year-picker-clear", "Clear selected date");
+      clearButton.addEventListener("click", function () {
+        clearValue();
+        close(true);
+      });
+      state.popover.appendChild(clearButton);
+    }
 
     state.trigger.addEventListener("click", function () {
       if (state.trigger.disabled) return;
@@ -605,6 +670,31 @@
     if (state.render) state.render();
   }
 
+  function setAvailability(input, calendar) {
+    if (!input || !calendar || typeof calendar !== "object") return;
+    var years = Array.isArray(calendar.years) ? calendar.years : [];
+    var months = calendar.months_by_year && typeof calendar.months_by_year === "object" ? calendar.months_by_year : {};
+    var dates = calendar.dates_by_month && typeof calendar.dates_by_month === "object" ? calendar.dates_by_month : {};
+    var allDaysInAvailableMonth = input.dataset.yearPickerAllDaysInAvailableMonth === "true";
+    input.dataset.calendarYears = JSON.stringify(years);
+    input.dataset.calendarMonths = JSON.stringify(months);
+    if (allDaysInAvailableMonth) input.removeAttribute("data-calendar-dates");
+    else input.dataset.calendarDates = JSON.stringify(dates);
+    var state = mounted.get(input) || mount(input);
+    if (!state) return;
+    state.years = availableYears(input);
+    state.hasImportedYears = state.years.length > 0;
+    state.hasImportedMonths = true;
+    state.monthsByYear = availableMonthsByYear(input);
+    state.hasImportedDates = !allDaysInAvailableMonth;
+    state.datesByMonth = allDaysInAvailableMonth ? {} : availableDatesByMonth(input);
+    if (state.years.length && !isSupportedYear(state.viewYear, state.years)) {
+      state.viewYear = state.years[0];
+      state.viewMonth = (state.monthsByYear[String(state.viewYear)] || [1])[0] - 1;
+    }
+    if (state.render) state.render();
+  }
+
   function mountAll(root) {
     var container = root || document;
     if (container.matches && container.matches("input[data-year-navigable-picker]")) mount(container);
@@ -621,7 +711,7 @@
     if (openState) positionPopover(openState);
   }
 
-  window.EcoTrackYearPicker = { mount: mount, mountAll: mountAll, sync: sync };
+  window.EcoTrackYearPicker = { mount: mount, mountAll: mountAll, sync: sync, setAvailability: setAvailability };
   function initialize() {
     mountAll(document);
     document.dispatchEvent(new Event("ecotrackyearpickerready"));

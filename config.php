@@ -266,6 +266,18 @@ function isWasteSummaryRow($values)
     return false;
 }
 
+/** Return the canonical Phase label from a source label, or an empty string. */
+function normalizeWastePhaseCollectionGroup($value)
+{
+    $value = trim((string)$value);
+    if ($value === '' || !preg_match('/^\s*phase\s*([0-9]+(?:\s*-?\s*[a-z](?![a-z]))?)(?=\s|\(|$)/iu', $value, $matches)) {
+        return '';
+    }
+
+    $phaseToken = strtoupper(preg_replace('/\s+/', '', trim($matches[1])));
+    return 'Phase ' . $phaseToken;
+}
+
 /** Split a source label into its collection group and reporting period. */
 function splitWasteCollectionGroupAndPeriod($sourceLabel, $fallbackGroup = '')
 {
@@ -278,12 +290,25 @@ function splitWasteCollectionGroupAndPeriod($sourceLabel, $fallbackGroup = '')
 
     if (preg_match('/^(.*?)\s*(?:[-–—]\s*)?date\s*:\s*(.+)$/i', $sourceLabel, $matches)) {
         $group = trim($matches[1], " \t\n\r\0\x0B-–—");
+        $group = normalizeWastePhaseCollectionGroup($group) ?: $group;
         return [$group !== '' ? $group : $fallbackGroup, trim($matches[2])];
     }
 
     if (preg_match('/^(.*?)\s*\((.+)\)\s*$/u', $sourceLabel, $matches)) {
         $group = trim($matches[1]);
         $period = trim($matches[2]);
+        if ($group !== '' && $period !== '') {
+            return [normalizeWastePhaseCollectionGroup($group) ?: $group, $period];
+        }
+    }
+
+    // Legacy sheets sometimes omitted the opening parenthesis, producing
+    // values such as "Phase 5 Apr 28–May 3, 2025)". The leading Phase is
+    // the Collection Group; the date text is its reporting period.
+    $monthPattern = '(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)';
+    if (preg_match('/^\s*(phase\s*[0-9]+(?:\s*-?\s*[a-z](?![a-z]))?)\s*\(?\s*((' . $monthPattern . ')\b.*\b(?:19|20)\d{2})\)?\s*$/iu', $sourceLabel, $matches)) {
+        $group = normalizeWastePhaseCollectionGroup($matches[1]);
+        $period = trim($matches[2], " \t\n\r\0\x0B()");
         if ($group !== '' && $period !== '') {
             return [$group, $period];
         }
@@ -948,7 +973,7 @@ function ensureWasteImportAuditTable($conn)
 function wasteImportAuditFormat($fileName)
 {
     $format = strtolower((string)pathinfo((string)$fileName, PATHINFO_EXTENSION));
-    return in_array($format, ['csv', 'xls', 'xlsx', 'xlsm', 'pdf'], true) ? $format : '';
+    return in_array($format, ['csv', 'txt', 'xls', 'xlsx', 'xlsm', 'json', 'docx', 'pdf'], true) ? $format : '';
 }
 
 function logWasteImportEvent($conn, array $event)
@@ -1158,6 +1183,52 @@ function ensureReportsTable($conn)
     }
 }
 
+/** Attendance is deliberately separate from Waste Data so historical records
+ * remain tied to authenticated collector accounts without changing users. */
+function attendanceStatusOptions()
+{
+    return [
+        'present' => 'Present',
+        'absent' => 'Absent',
+        'late' => 'Late',
+        'on_leave' => 'On Leave',
+    ];
+}
+
+function normalizeAttendanceStatus($status)
+{
+    $status = strtolower(trim((string)$status));
+    return array_key_exists($status, attendanceStatusOptions()) ? $status : '';
+}
+
+function ensureCollectorAttendanceTable($conn)
+{
+    static $checked = false;
+    if (!$conn || $checked) {
+        return;
+    }
+
+    try {
+        $conn->exec("CREATE TABLE IF NOT EXISTS collector_attendance (
+            id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+            collector_user_id INT NOT NULL,
+            attendance_date DATE NOT NULL,
+            status ENUM('present', 'absent', 'late', 'on_leave') NOT NULL,
+            recorded_by INT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+            UNIQUE KEY unique_collector_attendance_day (collector_user_id, attendance_date),
+            INDEX idx_collector_attendance_date_status (attendance_date, status),
+            INDEX idx_collector_attendance_collector_date (collector_user_id, attendance_date),
+            CONSTRAINT fk_collector_attendance_collector FOREIGN KEY (collector_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+            CONSTRAINT fk_collector_attendance_recorded_by FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE SET NULL
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        $checked = true;
+    } catch (PDOException $e) {
+        error_log('Failed to create collector attendance table: ' . $e->getMessage());
+    }
+}
+
 // Create append-only activity logging on demand for existing installations.
 function ensureActivityLogsTable($conn)
 {
@@ -1354,11 +1425,15 @@ function completeEcoTrackLogin($conn, array $user, $ipAddress = null, $restoredF
         logActivity('Logged in', 'Authentication', 'Success', $conn, $user);
     }
 
-    if (($user['user_type'] ?? '') !== 'admin') {
-        return 'staff_home.php';
-    }
+    return userLandingRoute($user['user_type'] ?? '');
+}
 
-    return 'admin_dashboard.php';
+/** Return the only valid landing page for each authenticated role. */
+function userLandingRoute($userType): string
+{
+    if ($userType === 'admin') return 'admin_dashboard.php';
+    if ($userType === 'waste_collector') return 'waste_collector_attendance.php';
+    return 'staff_home.php';
 }
 
 function ensureTwoFactorCodesTable($conn)
@@ -1440,6 +1515,7 @@ function isSupportedActionOtpPurpose($purpose)
         'export',
         'recent_import_activity_print',
         'waste_import',
+        'database_backup',
     ], true);
 }
 
@@ -1449,6 +1525,7 @@ function actionOtpLabel($purpose)
         'export' => 'data download',
         'recent_import_activity_print' => 'Recent Import Activity printout',
         'waste_import' => 'Waste Data import',
+        'database_backup' => 'database backup',
     ];
 
     return $labels[$purpose] ?? 'EcoTrack action';
@@ -2136,6 +2213,32 @@ function getCurrentUser()
     return null;
 }
 
+function ecoTrackRequestExpectsJson(): bool
+{
+    $script = basename((string)($_SERVER['SCRIPT_NAME'] ?? ''));
+    if (in_array($script, ['street_chart_filter_state.php', 'waste_data_version.php', 'notification_feed.php'], true)) return true;
+    if (strtolower((string)($_GET['format'] ?? '')) === 'json') return true;
+    if (strtolower((string)($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '')) === 'xmlhttprequest') return true;
+    return stripos((string)($_SERVER['HTTP_ACCEPT'] ?? ''), 'application/json') !== false;
+}
+
+/** A collector is denied by default, including shared pages reached by a direct URL. */
+function assertWasteCollectorRouteAccess(array $user): void
+{
+    if (($user['user_type'] ?? '') !== 'waste_collector') return;
+    $allowed = ['waste_collector_attendance.php', 'access_denied.php', 'login.php', 'role_landing_redirect.php'];
+    if (in_array(basename((string)($_SERVER['SCRIPT_NAME'] ?? '')), $allowed, true)) return;
+    sendNoCacheHeaders();
+    if (ecoTrackRequestExpectsJson()) {
+        header('Content-Type: application/json; charset=utf-8');
+        http_response_code(403);
+        echo json_encode(['error' => 'Access denied.']);
+    } else {
+        header('Location: access_denied.php');
+    }
+    exit();
+}
+
 // Redirect if not logged in
 function requireLogin()
 {
@@ -2176,6 +2279,7 @@ function requireLogin()
     }
     $_SESSION['user'] = array_merge((array)($_SESSION['user'] ?? []), $liveUser);
     $_SESSION['user_id'] = (int)$liveUser['id'];
+    assertWasteCollectorRouteAccess($liveUser);
     sendNoCacheHeaders();
     updateLastActivity();
 }

@@ -56,6 +56,21 @@ function generateRuleBasedExplanation($chartId, $data, $language = 'en')
             : ($isTagalog ? 'Wala pang waste records, kaya ang kabuuang nakolektang basura ay 0.00 kg.' : 'There are no waste records yet, so the total collected waste is 0.00 kg.');
     }
 
+    if ($chartId === 'monthly-waste') {
+        $total = (float)($data['monthly_waste_kg'] ?? 0);
+        $records = (int)($data['total_records'] ?? 0);
+        $period = trim((string)($data['period'] ?? 'the selected month'));
+        if ($records <= 0) {
+            return $isTagalog
+                ? 'Wala pang waste records para sa ' . $period . ', kaya ang monthly waste ay 0.00 kg.'
+                : 'There are no waste records for ' . $period . ', so monthly waste is 0.00 kg.';
+        }
+        $average = explanationKg($total / $records);
+        return $isTagalog
+            ? 'Para sa ' . $period . ', may ' . explanationKg($total) . ' na naitala mula sa ' . number_format($records) . ' waste entries. Katumbas ito ng average na ' . $average . ' bawat entry para sa napiling buwan.'
+            : 'For ' . $period . ', ' . explanationKg($total) . ' was recorded across ' . number_format($records) . ' waste entries. That is an average of ' . $average . ' per entry for the selected month.';
+    }
+
     if ($chartId === 'diversion-rate') {
         $rate = (float)($data['diversion_rate_percent'] ?? 0);
         $diverted = (float)($data['diverted_kg'] ?? 0);
@@ -101,22 +116,47 @@ function generateRuleBasedExplanation($chartId, $data, $language = 'en')
     }
 
     if ($chartId === 'waste-household') {
-        $rows = is_array($data['areas'] ?? null) ? $data['areas'] : [];
-        if (!$rows) {
-            return $isTagalog ? 'Wala pang waste records na maikukumpara sa mga Collection Group at Area.' : 'There are no waste records yet. Add waste records to compare Phase and Street areas.';
+        $summary = is_array($data['summary'] ?? null) ? $data['summary'] : [];
+        $streetCount = (int)($summary['street_count'] ?? 0);
+        if ($streetCount === 0) {
+            return $isTagalog
+                ? 'Wala pang aktibong waste records na tugma sa napiling street filters.'
+                : 'There are no active waste records matching the selected street filters.';
         }
-        usort($rows, function ($a, $b) {
-            return (float)($b['total_waste'] ?? 0) <=> (float)($a['total_waste'] ?? 0);
-        });
-        $top = $rows[0];
-        $second = $rows[1] ?? null;
-        $topTotal = (float)($top['total_waste'] ?? 0);
-        $lead = $second ? ' It leads the next area by ' . explanationKg(explanationDifference($topTotal, $second['total_waste'] ?? 0)) . '.' : '';
+
+        $highest = is_array($summary['highest'] ?? null) ? $summary['highest'] : [];
+        $lowest = is_array($summary['lowest'] ?? null) ? $summary['lowest'] : [];
+        $dominant = is_array($summary['dominant_category'] ?? null) ? $summary['dominant_category'] : [];
+        $phaseTotals = is_array($summary['phase_totals'] ?? null) ? $summary['phase_totals'] : [];
+        $filters = is_array($data['filters'] ?? null) ? $data['filters'] : [];
+        $topLabel = trim((string)($highest['phase_name'] ?? '') . ' · ' . (string)($highest['street'] ?? ''));
+        $lowLabel = trim((string)($lowest['phase_name'] ?? '') . ' · ' . (string)($lowest['street'] ?? ''));
+        $displayed = (int)($summary['displayed_street_count'] ?? 0);
+        $topShare = (float)($summary['top_street_share'] ?? 0);
+
         if ($isTagalog) {
-            $tagalogLead = $second ? ' Mas mataas ito nang ' . explanationKg(explanationDifference($topTotal, $second['total_waste'] ?? 0)) . ' kaysa sa susunod na area.' : '';
-            return ($top['street'] ?? 'Ang nangungunang area') . ' sa ' . ($top['phase_name'] ?? 'collection group nito') . ' ang may pinakamataas na naitalang basura na ' . explanationKg($topTotal) . '.' . $tagalogLead . ' Inihahambing ng chart ang bawat Collection Group + Area gamit ang pinakamataas nitong uploaded record, mula pinakamataas hanggang pinakamababa.';
+            $lines = [
+                'Pinakamataas: ' . $topLabel . ' — ' . explanationKg($highest['total_waste'] ?? 0) . '.',
+                'Pinakamababang may naitalang koleksyon: ' . $lowLabel . ' — ' . explanationKg($lowest['total_waste'] ?? 0) . '.',
+                'Nangungunang category: ' . ($dominant['label'] ?? 'Wala') . ' — ' . explanationKg($dominant['total_waste'] ?? 0) . ' (' . number_format((float)($dominant['percent'] ?? 0), 1) . '% ng filtered total).',
+                'Distribution: ang nangungunang street ay ' . number_format($topShare, 1) . '% ng ' . number_format($streetCount) . ' filtered streets; ' . number_format($displayed) . ' ang kasalukuyang nasa chart.',
+            ];
+            if (($filters['phase'] ?? '') === '' && count($phaseTotals) > 1) {
+                $lines[] = 'Paghahambing ng phase: ' . ($phaseTotals[0]['phase_name'] ?? 'Nangungunang phase') . ' ang may ' . explanationKg($phaseTotals[0]['total_waste'] ?? 0) . ' sa filtered streets.';
+            }
+            return implode("\n", $lines);
         }
-        return ($top['street'] ?? 'The top establishment') . ' in ' . ($top['phase_name'] ?? 'its collection group') . ' has the highest recorded waste at ' . explanationKg($topTotal) . '.' . $lead . ' The chart compares each Collection Group + Area using its single highest uploaded record, ranked from highest to lowest.';
+
+        $lines = [
+            'Highest collection: ' . $topLabel . ' — ' . explanationKg($highest['total_waste'] ?? 0) . '.',
+            'Lowest recorded collection: ' . $lowLabel . ' — ' . explanationKg($lowest['total_waste'] ?? 0) . '.',
+            'Dominant category: ' . ($dominant['label'] ?? 'No category data') . ' — ' . explanationKg($dominant['total_waste'] ?? 0) . ' (' . number_format((float)($dominant['percent'] ?? 0), 1) . '% of the filtered total).',
+            'Distribution: the leading street represents ' . number_format($topShare, 1) . '% of ' . number_format($streetCount) . ' filtered streets; ' . number_format($displayed) . ' are currently shown in the chart.',
+        ];
+        if (($filters['phase'] ?? '') === '' && count($phaseTotals) > 1) {
+            $lines[] = 'Phase comparison: ' . ($phaseTotals[0]['phase_name'] ?? 'The leading phase') . ' leads the filtered streets with ' . explanationKg($phaseTotals[0]['total_waste'] ?? 0) . '.';
+        }
+        return implode("\n", $lines);
     }
 
     if ($chartId === 'category-breakdown') {
@@ -162,28 +202,6 @@ function generateRuleBasedExplanation($chartId, $data, $language = 'en')
         return 'The latest collection date (' . ($last['date'] ?? 'latest collection date') . ') records ' . explanationKg($last['total_waste'] ?? 0) . '. ' . $trend . ' The highest point is ' . explanationKg($peak['total_waste'] ?? 0) . ' on ' . ($peak['date'] ?? 'the peak collection date') . '.';
     }
 
-    if ($chartId === 'collector-comparison') {
-        $rows = is_array($data['collectors'] ?? null) ? $data['collectors'] : [];
-        if (!$rows) {
-            return $isTagalog ? 'Wala pang collector data. Magdagdag ng collector names sa waste records para makita ang chart.' : 'There is no collector data yet. Add collector names to waste records to show this chart.';
-        }
-        usort($rows, function ($a, $b) {
-            return (float)($b['total_waste'] ?? 0) <=> (float)($a['total_waste'] ?? 0);
-        });
-        $top = $rows[0];
-        $second = $rows[1] ?? null;
-        $total = array_sum(array_map(function ($row) {
-            return (float)($row['total_waste'] ?? 0);
-        }, $rows));
-        $topTotal = (float)($top['total_waste'] ?? 0);
-        $secondText = $second ? ' The next highest is ' . ($second['garbage_collector'] ?? 'the next collector') . ' at ' . explanationKg($second['total_waste'] ?? 0) . ', a difference of ' . explanationKg(explanationDifference($topTotal, $second['total_waste'] ?? 0)) . '.' : '';
-        if ($isTagalog) {
-            $tagalogSecondText = $second ? ' Ang susunod ay si ' . ($second['garbage_collector'] ?? 'ang susunod na collector') . ' na may ' . explanationKg($second['total_waste'] ?? 0) . ', na may pagitan na ' . explanationKg(explanationDifference($topTotal, $second['total_waste'] ?? 0)) . '.' : '';
-            return ($top['garbage_collector'] ?? 'Ang nangungunang collector') . ' ang may pinakamataas na naitalang koleksyon na ' . explanationKg($topTotal) . ', o ' . number_format(explanationPercentOfTotal($topTotal, $total), 0) . '% ng kinumparang total.' . $tagalogSecondText . ' Ipinapakita nito kung paano nahahati ang naitalang collection volume sa mga collector.';
-        }
-        return ($top['garbage_collector'] ?? 'The top collector') . ' has the highest recorded collection at ' . explanationKg($topTotal) . ', representing ' . number_format(explanationPercentOfTotal($topTotal, $total), 0) . '% of the compared total.' . $secondText . ' This comparison shows how recorded collection volume is distributed among collectors.';
-    }
-
     return $isTagalog ? 'Wala pang available na insight para sa dashboard card na ito.' : 'No explanation is available for this dashboard card yet.';
 }
 
@@ -203,19 +221,29 @@ if (!is_array($request) || !isset($request['id'], $request['data'])) {
 
 $allowedCharts = [
     'total-waste' => 'Total Waste Collected',
+    'monthly-waste' => 'Monthly Waste',
     'diversion-rate' => 'Waste Diversion Rate',
     'highest-household' => 'Highest Waste Record',
     'records-collectors' => 'Records And Collectors',
-    'waste-household' => 'Waste by Collection Group / Area',
+    'waste-household' => 'Waste Collection per Street',
     'category-breakdown' => 'Waste Category Breakdown',
     'collection-trend' => 'Waste Collection Trend',
-    'collector-comparison' => 'Collector Comparison',
 ];
 $chartId = (string)$request['id'];
 if (!isset($allowedCharts[$chartId])) {
     explanationResponse(400, ['error' => 'Unknown dashboard card.']);
 }
 $language = ($request['language'] ?? 'en') === 'tl' ? 'tl' : 'en';
+
+// This card presents exact filtered operational facts. Keep its wording
+// deterministic even when an OpenAI key is configured, so no generated text
+// can alter, infer, or fabricate a collection insight.
+if ($chartId === 'waste-household') {
+    explanationResponse(200, [
+        'explanation' => generateRuleBasedExplanation($chartId, $request['data'], $language),
+        'source' => 'street_summary',
+    ]);
+}
 
 // The trend card already calculates its exact week-to-week movement on the
 // server. Return that shared interpretation directly so an AI response cannot

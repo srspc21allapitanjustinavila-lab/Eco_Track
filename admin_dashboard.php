@@ -1,6 +1,7 @@
 <?php
 require_once 'config.php';
 require_once 'includes/waste_analytics.php';
+require_once 'includes/attendance_management.php';
 require_once 'includes/weekly_waste_trend.php';
 requireUserType('admin');
 
@@ -18,6 +19,7 @@ ensureWasteAnalyticsColumns($conn);
 ensureWeeklyWasteTrendColumns($conn);
 ensureNotificationsTable($conn);
 ensureDailyTaskBatching($conn);
+ensureCollectorAttendanceTable($conn);
 $wasteDataState = getWasteDataVersion($conn);
 $adminSettings = getUserSettings($conn, $user['id']);
 
@@ -46,12 +48,55 @@ $visualizationYearFilters = [
     'group' => normalizeWasteCollectionYear($_GET['group_year'] ?? ''),
     'area' => normalizeWasteCollectionYear($_GET['area_year'] ?? ''),
     'category' => normalizeWasteCollectionYear($_GET['category_year'] ?? ''),
-    'collector' => normalizeWasteCollectionYear($_GET['collector_year'] ?? ''),
 ];
 foreach ($visualizationYearFilters as $filterName => $requestedYear) {
     $visualizationYearFilters[$filterName] = resolveImportedWasteCollectionYear($requestedYear, $visualizationYears);
 }
 $areaMonthFilter = normalizeWasteCollectionMonth($_GET['area_month'] ?? '');
+$streetPeriodProvided = is_string($_GET['street_period'] ?? null);
+$streetFilterMode = $streetPeriodProvided ? strtolower(trim($_GET['street_period'])) : 'all';
+if (!in_array($streetFilterMode, ['all', 'month', 'year', 'range', 'custom'], true)) $streetFilterMode = 'all';
+$streetMonthSelection = is_string($_GET['street_month'] ?? null) ? trim($_GET['street_month']) : '';
+$streetYearSelection = is_string($_GET['street_year'] ?? null) ? trim($_GET['street_year']) : '';
+$streetRangeStartMonth = normalizeWasteStreetMonthValue($_GET['street_range_start_month'] ?? '');
+$streetRangeEndMonth = normalizeWasteStreetMonthValue($_GET['street_range_end_month'] ?? '');
+$streetCustomStart = is_string($_GET['street_custom_start'] ?? null) ? trim($_GET['street_custom_start']) : '';
+$streetCustomEnd = is_string($_GET['street_custom_end'] ?? null) ? trim($_GET['street_custom_end']) : '';
+$streetStart = is_string($_GET['street_start'] ?? null) ? $_GET['street_start'] : '';
+$streetEnd = is_string($_GET['street_end'] ?? null) ? $_GET['street_end'] : '';
+if (!$streetPeriodProvided && ($streetStart !== '' || $streetEnd !== '')) $streetFilterMode = 'range';
+if ($streetFilterMode === 'month' && preg_match('/^(19|20)\d{2}-(0[1-9]|1[0-2])$/', $streetMonthSelection)) {
+    $streetStart = $streetMonthSelection . '-01';
+    $streetEnd = (new DateTimeImmutable($streetStart))->modify('last day of this month')->format('Y-m-d');
+} elseif ($streetFilterMode === 'year' && preg_match('/^(19|20)\d{2}$/', $streetYearSelection)) {
+    $streetStart = $streetYearSelection . '-01-01';
+    $streetEnd = $streetYearSelection . '-12-31';
+} elseif ($streetFilterMode === 'range') {
+    // Legacy date-bound URLs remain valid, but ranges now always cover full months.
+    if ($streetRangeStartMonth === '' && is_string($streetStart) && preg_match('/^(19|20)\d{2}-(0[1-9]|1[0-2])-\d{2}$/', $streetStart)) {
+        $streetRangeStartMonth = substr($streetStart, 0, 7);
+    }
+    if ($streetRangeEndMonth === '' && is_string($streetEnd) && preg_match('/^(19|20)\d{2}-(0[1-9]|1[0-2])-\d{2}$/', $streetEnd)) {
+        $streetRangeEndMonth = substr($streetEnd, 0, 7);
+    }
+    $streetMonthRange = resolveWasteStreetMonthRange($streetRangeStartMonth, $streetRangeEndMonth);
+    $streetRangeStartMonth = $streetMonthRange['start_month'];
+    $streetRangeEndMonth = $streetMonthRange['end_month'];
+    $streetStart = $streetMonthRange['start_date'];
+    $streetEnd = $streetMonthRange['end_date'];
+} elseif ($streetFilterMode === 'custom') {
+    $streetStart = $streetCustomStart;
+    $streetEnd = $streetCustomEnd;
+} elseif ($streetFilterMode === 'all') {
+    $streetStart = '';
+    $streetEnd = '';
+}
+$streetFilterInput = [
+    'phase' => is_string($_GET['street_phase'] ?? null) ? trim($_GET['street_phase']) : '',
+    'category' => is_string($_GET['street_category'] ?? null) ? strtolower(trim($_GET['street_category'])) : 'all',
+    'start_date' => $streetStart,
+    'end_date' => $streetEnd,
+];
 function renderDashboardVisualizationYearControl($controlName, $selectedYear, $yearOptions, $allFilters, $label)
 {
     ?>
@@ -356,9 +401,13 @@ $dashboardSummary = [
     'active_collectors' => 0,
 ];
 $phaseStreetComparison = [];
+$streetVisualization = ['rows' => [], 'details' => [], 'definitions' => getWasteStreetCategoryDefinitions(), 'summary' => [], 'filters' => $streetFilterInput];
+$streetPhaseOptions = [];
+$streetFilterState = ['calendar' => ['years' => [], 'months_by_year' => [], 'dates_by_month' => []], 'has_unclassified' => false];
+$streetFilterNotice = '';
+$streetDetailSelection = null;
 $allPhaseStreetComparison = [];
 $areaPhaseComparison = [];
-$collectorComparison = [];
 $weeklyTrendData = buildWeeklyWasteTrendAnalysis([], resolveWeeklyWasteTrendFilters([], $_GET));
 $highestPhase = [
     'phase_name' => 'No data',
@@ -381,6 +430,19 @@ $diversionVisualizationRate = 0;
 $highestVisualizationComparison = [];
 $highestVisualization = $highestPhase;
 $recordsVisualizationSummary = ['total_records' => 0, 'active_collectors' => 0];
+$attendanceDashboardSummary = array_fill_keys(array_keys(attendanceStatusOptions()), 0);
+$attendanceDashboardAvailable = false;
+$attendanceNotRecorded = 0;
+try {
+    ensureBioAttendanceSchema($conn);
+    syncBioCollectors($conn);
+    $attendanceState = bioAttendanceQuery($conn, attendanceToday(), '', '', 1, 1);
+    $attendanceDashboardSummary = $attendanceState['summary'];
+    $attendanceNotRecorded = $attendanceState['summary']['not_recorded'];
+    $attendanceDashboardAvailable = true;
+} catch (Throwable $e) {
+    error_log('Dashboard attendance unavailable: ' . $e->getMessage());
+}
 
 try {
     // Every dashboard KPI and visualization starts from this same active,
@@ -445,10 +507,56 @@ try {
     $groupAnalytics = buildWasteAnalyticsFromRecords($groupRecords);
     $areaPhaseComparison = array_slice($groupAnalytics['phase_totals'], 0, 6);
 
-    // Compare each street/establishment within its collection group using its
-    // highest record from all uploads in the selected year.
-    $areaRecords = filterWasteRecordsByCollectionPeriod($comparisonRecords, $visualizationYearFilters['area'], $areaMonthFilter);
-    $phaseStreetComparison = buildPhaseStreetRecordComparison($areaRecords, 6);
+    // The street card filters the same active Phase + Street source records
+    // used for its chart, cards, and View Insights payload.
+    $streetVisualization = buildWasteStreetComparison($comparisonRecords, $streetFilterInput);
+    $streetFilterState = $streetVisualization['filter_state'];
+    $streetFilterInput = $streetVisualization['filters'];
+    if ($streetFilterMode === 'custom') {
+        // Reflect the normalized order back into the two visible date fields.
+        $streetCustomStart = $streetFilterInput['start_date'];
+        $streetCustomEnd = $streetFilterInput['end_date'];
+    }
+    $streetPhaseOptions = $streetFilterState['phase_options'];
+    $streetCalendarPeriods = [];
+    foreach ($streetFilterState['calendar']['months_by_year'] as $calendarYear => $calendarMonths) {
+        foreach ($calendarMonths as $calendarMonth) {
+            $streetCalendarPeriods[sprintf('%04d-%02d', (int)$calendarYear, (int)$calendarMonth)] = true;
+        }
+    }
+    $invalidStreetSelection = false;
+    if ($streetFilterMode === 'month') $invalidStreetSelection = !isset($streetCalendarPeriods[$streetMonthSelection]);
+    elseif ($streetFilterMode === 'year') $invalidStreetSelection = !in_array((int)$streetYearSelection, $streetFilterState['calendar']['years'], true);
+    elseif ($streetFilterMode === 'range') {
+        $invalidStreetSelection = ($streetRangeStartMonth !== '' && !isset($streetCalendarPeriods[$streetRangeStartMonth]))
+            || ($streetRangeEndMonth !== '' && !isset($streetCalendarPeriods[$streetRangeEndMonth]));
+    } elseif ($streetFilterMode === 'custom') {
+        // Custom calendars enable every day in a data-backed month, not just
+        // dates that happen to have a collection record.
+        $invalidStreetSelection = ($streetVisualization['filters']['start_date'] !== '' && !isset($streetCalendarPeriods[substr($streetVisualization['filters']['start_date'], 0, 7)]))
+            || ($streetVisualization['filters']['end_date'] !== '' && !isset($streetCalendarPeriods[substr($streetVisualization['filters']['end_date'], 0, 7)]));
+    }
+    if ($invalidStreetSelection) {
+        $streetFilterInput['start_date'] = '';
+        $streetFilterInput['end_date'] = '';
+        $streetFilterMode = 'all';
+        $streetMonthSelection = '';
+        $streetYearSelection = '';
+        $streetRangeStartMonth = '';
+        $streetRangeEndMonth = '';
+        $streetCustomStart = '';
+        $streetCustomEnd = '';
+        $streetVisualization = buildWasteStreetComparison($comparisonRecords, $streetFilterInput);
+        $streetFilterState = $streetVisualization['filter_state'];
+        $streetFilterNotice = 'The requested period was cleared because it is unavailable for the current filters.';
+    }
+    $phaseStreetComparison = $streetVisualization['rows'];
+    $requestedStreetDetailKey = is_string($_GET['street_detail'] ?? null) ? trim($_GET['street_detail']) : '';
+    if ($requestedStreetDetailKey !== '' && isset($streetVisualization['details'][$requestedStreetDetailKey])) {
+        // This also provides a no-JavaScript fallback for every View Details
+        // link while retaining the exact data and filters used by its bar.
+        $streetDetailSelection = $streetVisualization['details'][$requestedStreetDetailKey];
+    }
 
     $categoryRecords = filterWasteRecordsByCollectionYear($comparisonRecords, $visualizationYearFilters['category']);
     $categoryVisualizationSummary = buildWasteCategorySummary($categoryRecords);
@@ -469,8 +577,6 @@ try {
     $weeklyTrendFilters = resolveWeeklyWasteTrendFilters($weeklyTrendRecords, $_GET);
     $weeklyTrendData = buildWeeklyWasteTrendAnalysis($weeklyTrendRecords, $weeklyTrendFilters);
 
-    $collectorRecords = filterWasteRecordsByCollectionYear($comparisonRecords, $visualizationYearFilters['collector']);
-    $collectorComparison = buildWasteCollectorComparison($collectorRecords, 5);
 } catch (PDOException $e) {
     $error = $error ?: "Waste visualizations could not load yet. Please check the waste_records table.";
 }
@@ -489,10 +595,6 @@ foreach ($areaPhaseComparison as $areaPhaseRow) {
 // MRF-inspired solid colors: recyclable, organic, residual, hazardous, then
 // supporting collection and processing colors for additional bars.
 $chartPalette = ['#2E7D32', '#8B5A2B', '#6B7280', '#DC2626', '#0F766E', '#D97706', '#0369A1', '#7C3AED'];
-$maxCollectorWaste = 0;
-foreach ($collectorComparison as $collectorRow) {
-    $maxCollectorWaste = max($maxCollectorWaste, (float)$collectorRow['total_waste']);
-}
 $weeklyTrendExplanationPeriods = array_map(static function ($week) {
     return [
         'date' => $week['label'],
@@ -540,8 +642,12 @@ $dashboardExplanationData = [
         'data' => ['total_records' => (int)$recordsVisualizationSummary['total_records'], 'active_collectors' => (int)$recordsVisualizationSummary['active_collectors']],
     ],
     'waste-household' => [
-        'title' => 'Waste by Collection Group / Area',
-        'data' => ['areas' => $phaseStreetComparison],
+        'title' => 'Waste Collection per Street',
+        'data' => [
+            'summary' => $streetVisualization['summary'],
+            'displayed_areas' => $phaseStreetComparison,
+            'filters' => $streetVisualization['filters'],
+        ],
     ],
     'category-breakdown' => [
         'title' => 'Waste Category Breakdown',
@@ -554,10 +660,6 @@ $dashboardExplanationData = [
             'trend_description' => $weeklyTrendData['description'],
             'trend_description_tl' => $weeklyTrendData['description_tl'],
         ],
-    ],
-    'collector-comparison' => [
-        'title' => 'Collector Comparison',
-        'data' => ['collectors' => $collectorComparison],
     ],
 ];
 // High-waste alerts are generated at most once per day for each administrator
@@ -997,25 +1099,129 @@ include 'includes/sidebar.php'; ?>
 
             <div class="insight-grid">
                 <section class="viz-card" data-visualization-key="area">
-                    <div class="viz-card-header"><h2>Waste by Collection Group / Area</h2><div class="viz-card-header-actions"><button type="button" class="explain-button" data-explanation-id="waste-household" aria-label="View insights for Waste by Collection Group and Area" title="View insights for this chart">&#9432;<span>View Insights</span></button><?php renderDashboardAreaPeriodControl($visualizationYearFilters['area'], $areaMonthFilter, $visualizationYears, $visualizationYearFilters); ?></div></div>
+                    <?php
+                    $streetSummary = $streetVisualization['summary'];
+                    $streetDisplayDefinitions = $streetVisualization['definitions'];
+                    if (empty($streetFilterState['has_unclassified'])) {
+                        unset($streetDisplayDefinitions['unclassified']);
+                    }
+                    $streetCategoryKeys = $streetVisualization['filters']['category'] === 'all'
+                        ? array_keys($streetDisplayDefinitions)
+                        : [$streetVisualization['filters']['category']];
+                    $streetTableDefinitions = $streetVisualization['filters']['category'] === 'all'
+                        ? $streetDisplayDefinitions
+                        : [$streetVisualization['filters']['category'] => $streetVisualization['definitions'][$streetVisualization['filters']['category']]];
+                    $streetHighest = $streetSummary['highest'] ?? null;
+                    $streetDominant = $streetSummary['dominant_category'] ?? null;
+                    $streetCalendarYears = json_encode($streetFilterState['calendar']['years'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+                    $streetCalendarMonths = json_encode($streetFilterState['calendar']['months_by_year'], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+                    $streetDetailsJson = json_encode($streetVisualization['details'] ?? [], JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+                    if ($streetDetailsJson === false) $streetDetailsJson = '{}';
+                    $streetDetailQuery = $_GET;
+                    unset($streetDetailQuery['street_detail']);
+                    $streetDetailBackUrl = 'admin_dashboard.php' . (empty($streetDetailQuery) ? '' : '?' . http_build_query($streetDetailQuery, '', '&', PHP_QUERY_RFC3986));
+                    $streetSelectedCategories = $streetDetailSelection['categories'] ?? [];
+                    ?>
+                    <div class="viz-card-header"><div><h2>Waste Collection per Street</h2><p class="chart-subtitle">Top 8 Phase + Street pairs by actual filtered collection. Unit: kilograms (kg).</p></div><div class="viz-card-header-actions"><button type="button" class="explain-button" data-explanation-id="waste-household" aria-label="View insights for Waste Collection per Street" title="View insights for this chart">&#9432;<span>View Insights</span></button></div></div>
+                    <div data-street-main-view<?php echo $streetDetailSelection ? ' hidden' : ''; ?>>
+                    <form method="get" action="admin_dashboard.php" class="street-chart-filters visualization-filter-control" data-street-chart-filter data-street-filter-state-url="street_chart_filter_state.php" aria-describedby="street-filter-status">
+                        <?php foreach ($visualizationYearFilters as $filterName => $filterValue): ?><?php if ($filterValue !== ''): ?><input type="hidden" name="<?php echo htmlspecialchars($filterName . '_year'); ?>" value="<?php echo htmlspecialchars($filterValue); ?>"><?php endif; ?><?php endforeach; ?>
+                        <?php if ($monthlyPeriod !== ''): ?><input type="hidden" name="monthly_period" value="<?php echo htmlspecialchars($monthlyPeriod); ?>"><?php endif; ?>
+                        <div class="street-filter-field"><label for="street-phase">Phase</label><select id="street-phase" name="street_phase"><option value="">All Phases</option><?php foreach ($streetPhaseOptions as $phaseOption): ?><option value="<?php echo htmlspecialchars($phaseOption); ?>" <?php echo $streetVisualization['filters']['phase'] === $phaseOption ? 'selected' : ''; ?>><?php echo htmlspecialchars($phaseOption); ?></option><?php endforeach; ?></select></div>
+                        <div class="street-filter-field"><label for="street-category">Waste Category</label><select id="street-category" name="street_category"><option value="all">All Categories</option><?php foreach ($streetVisualization['definitions'] as $categoryKey => $definition): ?><?php if ($categoryKey !== 'unclassified' || !empty($streetFilterState['has_unclassified'])): ?><option value="<?php echo htmlspecialchars($categoryKey); ?>" <?php echo $streetVisualization['filters']['category'] === $categoryKey ? 'selected' : ''; ?>><?php echo htmlspecialchars($definition['label']); ?></option><?php endif; ?><?php endforeach; ?></select></div>
+                        <div class="street-filter-field"><label for="street-period">Period</label><select id="street-period" name="street_period" data-street-period-mode><option value="all" <?php echo $streetFilterMode === 'all' ? 'selected' : ''; ?>>All dates</option><option value="month" <?php echo $streetFilterMode === 'month' ? 'selected' : ''; ?>>Monthly</option><option value="year" <?php echo $streetFilterMode === 'year' ? 'selected' : ''; ?>>Yearly</option><option value="range" <?php echo $streetFilterMode === 'range' ? 'selected' : ''; ?>>Month Range</option><option value="custom" <?php echo $streetFilterMode === 'custom' ? 'selected' : ''; ?>>Custom Dates</option></select></div>
+                        <div class="street-filter-field" data-street-period-field="month"<?php echo $streetFilterMode === 'month' ? '' : ' hidden'; ?>><label for="street-month">Collection month</label><input id="street-month" type="month" name="street_month" value="<?php echo htmlspecialchars($streetMonthSelection); ?>" data-year-navigable-picker="month" data-year-picker-allow-empty="true" data-year-picker-placeholder="Choose month" data-calendar-years='<?php echo htmlspecialchars($streetCalendarYears ?: '[]', ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($streetCalendarMonths ?: '{}', ENT_QUOTES, 'UTF-8'); ?>'></div>
+                        <div class="street-filter-field" data-street-period-field="year"<?php echo $streetFilterMode === 'year' ? '' : ' hidden'; ?>><label for="street-year">Collection year</label><select id="street-year" name="street_year"><option value="">Choose year</option><?php foreach ($streetFilterState['calendar']['years'] as $streetYear): ?><option value="<?php echo (int)$streetYear; ?>" <?php echo $streetYearSelection === (string)$streetYear ? 'selected' : ''; ?>><?php echo (int)$streetYear; ?></option><?php endforeach; ?></select></div>
+                        <div class="street-filter-field" data-street-period-field="range"<?php echo $streetFilterMode === 'range' ? '' : ' hidden'; ?>><label for="street-range-start-month">From month</label><input id="street-range-start-month" type="month" name="street_range_start_month" value="<?php echo htmlspecialchars($streetRangeStartMonth); ?>" data-year-navigable-picker="month" data-year-picker-allow-empty="true" data-year-picker-placeholder="Choose start month" data-calendar-years='<?php echo htmlspecialchars($streetCalendarYears ?: '[]', ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($streetCalendarMonths ?: '{}', ENT_QUOTES, 'UTF-8'); ?>'></div>
+                        <div class="street-filter-field" data-street-period-field="range"<?php echo $streetFilterMode === 'range' ? '' : ' hidden'; ?>><label for="street-range-end-month">To month</label><input id="street-range-end-month" type="month" name="street_range_end_month" value="<?php echo htmlspecialchars($streetRangeEndMonth); ?>" data-year-navigable-picker="month" data-year-picker-allow-empty="true" data-year-picker-placeholder="Choose end month" data-calendar-years='<?php echo htmlspecialchars($streetCalendarYears ?: '[]', ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($streetCalendarMonths ?: '{}', ENT_QUOTES, 'UTF-8'); ?>'></div>
+                        <div class="street-filter-field" data-street-period-field="custom"<?php echo $streetFilterMode === 'custom' ? '' : ' hidden'; ?>><label for="street-custom-start">Start date</label><input id="street-custom-start" type="date" name="street_custom_start" value="<?php echo htmlspecialchars($streetCustomStart); ?>" data-year-navigable-picker="date" data-year-picker-all-days-in-available-month="true" data-year-picker-allow-empty="true" data-year-picker-placeholder="Choose date" data-calendar-years='<?php echo htmlspecialchars($streetCalendarYears ?: '[]', ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($streetCalendarMonths ?: '{}', ENT_QUOTES, 'UTF-8'); ?>'></div>
+                        <div class="street-filter-field" data-street-period-field="custom"<?php echo $streetFilterMode === 'custom' ? '' : ' hidden'; ?>><label for="street-custom-end">End date</label><input id="street-custom-end" type="date" name="street_custom_end" value="<?php echo htmlspecialchars($streetCustomEnd); ?>" data-year-navigable-picker="date" data-year-picker-all-days-in-available-month="true" data-year-picker-allow-empty="true" data-year-picker-placeholder="Choose date" data-calendar-years='<?php echo htmlspecialchars($streetCalendarYears ?: '[]', ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($streetCalendarMonths ?: '{}', ENT_QUOTES, 'UTF-8'); ?>'></div>
+                        <div class="street-filter-actions" aria-label="Street filter actions">
+                            <button class="btn btn-upload" type="submit" data-street-filter-submit>Filter</button>
+                            <button class="btn btn-cancel" type="button" data-street-filter-reset>Reset</button>
+                        </div>
+                    </form>
+                    <p id="street-filter-status" class="street-filter-status<?php echo $error !== '' ? ' is-error' : ''; ?>" role="<?php echo $error !== '' ? 'alert' : 'status'; ?>" aria-live="polite"><?php echo $error !== '' ? htmlspecialchars($error) : htmlspecialchars($streetFilterNotice); ?></p>
+                    <div class="street-summary-grid" aria-label="Waste Collection per Street summary">
+                            <article><span>Total Waste Collected</span><strong><?php echo number_format((float)$streetSummary['total_waste'], 2); ?> kg</strong><small>All active filtered records</small></article>
+                            <article><span>Streets with Collection</span><strong><?php echo (int)$streetSummary['street_count']; ?></strong><small>Phase + Street identities</small></article>
+                            <article><span>Highest Collection Street</span><strong><?php echo $streetHighest ? number_format((float)$streetHighest['total_waste'], 2) . ' kg' : 'No data'; ?></strong><small><?php echo $streetHighest ? htmlspecialchars($streetHighest['phase_name'] . ' · ' . $streetHighest['street']) : 'No matching street'; ?></small></article>
+                            <article><span>Most Collected Category</span><strong><?php echo $streetDominant ? htmlspecialchars($streetDominant['label']) : 'No data'; ?></strong><small><?php echo $streetDominant ? number_format((float)$streetDominant['total_waste'], 2) . ' kg' : 'No category data'; ?></small></article>
+                        </div>
                     <?php if (empty($phaseStreetComparison)): ?>
-                        <div class="empty-state"><strong>No waste records yet</strong><span>Upload or add waste records to compare areas.</span></div>
+                        <div class="empty-state"><strong>No collection data available</strong><span>Adjust the filters or upload active waste records with a phase, street, and collection date.</span></div>
                     <?php else: ?>
-                        <div class="comparison-list">
-                            <?php foreach ($phaseStreetComparison as $phaseIndex => $phaseRow): ?>
-                                <?php $barWidth = $maxPhaseStreetWaste > 0 ? round(((float)$phaseRow['total_waste'] / $maxPhaseStreetWaste) * 100) : 0;
-                                $barColor = $chartPalette[$phaseIndex % count($chartPalette)]; ?>
-                                <div class="comparison-row">
-                                    <div class="comparison-meta">
-                                    <span><?php echo htmlspecialchars($phaseRow['street']); ?></span>
-                                    <span class="comparison-value"><?php echo number_format((float)$phaseRow['total_waste'], 2); ?> kg</span>
-                                </div>
-                                    <div class="comparison-detail"><?php echo htmlspecialchars($phaseRow['phase_name']); ?> &middot; <?php echo htmlspecialchars($phaseRow['period_label']); ?></div>
-                                    <div class="comparison-track"><div class="comparison-fill" style="--bar-width: <?php echo $barWidth; ?>%; --chart-color: <?php echo $barColor; ?>;"></div></div>
+                        <?php if ($streetVisualization['filters']['category'] === 'all'): ?><div class="street-chart-legend street-chart-modern-legend" aria-label="Waste category legend"><?php foreach ($streetDisplayDefinitions as $definition): ?><span><i style="--category-color:<?php echo htmlspecialchars($definition['color']); ?>"></i><?php echo htmlspecialchars($definition['label']); ?></span><?php endforeach; ?></div><?php endif; ?>
+                        <div class="street-horizontal-chart" aria-label="Horizontal bar chart of waste collection per street in kilograms">
+                            <div class="street-chart-rows">
+                            <?php foreach ($phaseStreetComparison as $phaseRow): ?>
+                                <?php
+                                  $barWidth = $maxPhaseStreetWaste > 0 ? max(2, ((float)$phaseRow['total_waste'] / $maxPhaseStreetWaste) * 100) : 0;
+                                  $stackTotal = 0.0; $tooltipLines = [];
+                                  foreach ($streetCategoryKeys as $categoryKey) { $amount = (float)($phaseRow['categories'][$categoryKey] ?? 0); $stackTotal += $amount; $tooltipLines[] = ($streetVisualization['definitions'][$categoryKey]['label'] ?? $categoryKey) . ': ' . number_format($amount, 2) . ' kg'; }
+                                  $tooltip = $phaseRow['phase_name'] . ' · ' . $phaseRow['street'] . "\nTotal: " . number_format((float)$phaseRow['total_waste'], 2) . " kg\n" . implode("\n", $tooltipLines);
+                                  $streetDetailLinkQuery = $streetDetailQuery;
+                                  $streetDetailLinkQuery['street_detail'] = $phaseRow['key'];
+                                  $streetDetailUrl = 'admin_dashboard.php?' . http_build_query($streetDetailLinkQuery, '', '&', PHP_QUERY_RFC3986);
+                                ?>
+                                <div class="street-chart-row">
+                                    <a href="<?php echo htmlspecialchars($streetDetailUrl, ENT_QUOTES, 'UTF-8'); ?>" class="street-chart-row-label street-chart-detail-trigger" data-street-detail-key="<?php echo htmlspecialchars($phaseRow['key'], ENT_QUOTES, 'UTF-8'); ?>" aria-label="View collection details for <?php echo htmlspecialchars($phaseRow['street'] . ', ' . $phaseRow['phase_name'], ENT_QUOTES, 'UTF-8'); ?>"><strong><?php echo htmlspecialchars($phaseRow['street']); ?></strong><small><?php echo htmlspecialchars($phaseRow['phase_name']); ?></small></a>
+                                    <div class="street-chart-track"><a href="<?php echo htmlspecialchars($streetDetailUrl, ENT_QUOTES, 'UTF-8'); ?>" class="street-chart-bar street-chart-detail-trigger" data-street-detail-key="<?php echo htmlspecialchars($phaseRow['key'], ENT_QUOTES, 'UTF-8'); ?>" data-street-tooltip="<?php echo htmlspecialchars($tooltip, ENT_QUOTES, 'UTF-8'); ?>" aria-label="View collection details for <?php echo htmlspecialchars($phaseRow['street'] . ', ' . $phaseRow['phase_name'] . '. ' . str_replace("\n", '. ', $tooltip), ENT_QUOTES, 'UTF-8'); ?>" style="--bar-width:<?php echo number_format($barWidth, 3, '.', ''); ?>%">
+                                        <?php foreach ($streetCategoryKeys as $categoryKey): $amount = (float)($phaseRow['categories'][$categoryKey] ?? 0); if ($amount <= 0 || $stackTotal <= 0) { continue; } ?><span style="--category-color:<?php echo htmlspecialchars($streetVisualization['definitions'][$categoryKey]['color']); ?>;--segment-share:<?php echo number_format(($amount / $stackTotal) * 100, 4, '.', ''); ?>%"></span><?php endforeach; ?>
+                                    </a></div>
+                                    <strong class="street-chart-row-value"><?php echo number_format((float)$phaseRow['total_waste'], 2); ?> kg</strong>
+                                    <a href="<?php echo htmlspecialchars($streetDetailUrl, ENT_QUOTES, 'UTF-8'); ?>" class="street-chart-details-button street-chart-detail-trigger" data-street-detail-key="<?php echo htmlspecialchars($phaseRow['key'], ENT_QUOTES, 'UTF-8'); ?>" aria-label="View details for <?php echo htmlspecialchars($phaseRow['street'] . ', ' . $phaseRow['phase_name'], ENT_QUOTES, 'UTF-8'); ?>">View Details</a>
                                 </div>
                             <?php endforeach; ?>
+                            </div>
                         </div>
+                        <div class="street-chart-tooltip" data-street-chart-tooltip role="tooltip" hidden></div>
+                        <?php if (false): /* Retired vertical chart retained only as a source-history guard. */ ?>
+                        <div class="street-chart-legend street-chart-legacy-legend" aria-hidden="true"><?php foreach ($streetVisualization['definitions'] as $definition): ?><span><i style="--category-color:<?php echo htmlspecialchars($definition['color']); ?>"></i><?php echo htmlspecialchars($definition['label']); ?></span><?php endforeach; ?></div>
+                        <div class="street-chart-wrap" tabindex="0" aria-label="Waste Collection per Street chart. The vertical axis is Collected Waste in kilograms. The horizontal axis is Street and Phase.">
+                            <div class="street-chart-axis street-chart-axis-y">Collected Waste (kg)</div>
+                            <div class="street-chart-plot">
+                                <div class="street-chart-grid"><span><?php echo number_format($maxPhaseStreetWaste, 2); ?></span><span><?php echo number_format($maxPhaseStreetWaste / 2, 2); ?></span><span>0</span></div>
+                                <div class="street-chart-bars">
+                                <?php foreach ($phaseStreetComparison as $phaseRow): ?>
+                                    <?php
+                                      $barHeight = $maxPhaseStreetWaste > 0 ? max(2, ((float)$phaseRow['total_waste'] / $maxPhaseStreetWaste) * 100) : 0;
+                                      $categoryKeys = $streetVisualization['filters']['category'] === 'all' ? array_keys($streetVisualization['definitions']) : [$streetVisualization['filters']['category']];
+                                      $stackTotal = 0.0; $tooltipLines = [];
+                                      foreach ($categoryKeys as $categoryKey) { $amount = (float)($phaseRow['categories'][$categoryKey] ?? 0); $stackTotal += $amount; $tooltipLines[] = ($streetVisualization['definitions'][$categoryKey]['label'] ?? $categoryKey) . ': ' . number_format($amount, 2) . ' kg'; }
+                                      $tooltip = $phaseRow['phase_name'] . ' · ' . $phaseRow['street'] . "\nTotal: " . number_format((float)$phaseRow['total_waste'], 2) . " kg\n" . implode("\n", $tooltipLines);
+                                    ?>
+                                    <div class="street-chart-column">
+                                        <span class="street-chart-value"><?php echo number_format((float)$phaseRow['total_waste'], 2); ?> kg</span>
+                                        <div class="street-chart-bar" tabindex="0" title="<?php echo htmlspecialchars($tooltip); ?>" aria-label="<?php echo htmlspecialchars(str_replace("\n", '. ', $tooltip)); ?>" style="--bar-height:<?php echo number_format($barHeight, 3, '.', ''); ?>%">
+                                            <?php foreach ($categoryKeys as $categoryKey): $amount = (float)($phaseRow['categories'][$categoryKey] ?? 0); if ($amount <= 0 || $stackTotal <= 0) { continue; } ?><span style="--category-color:<?php echo htmlspecialchars($streetVisualization['definitions'][$categoryKey]['color']); ?>;--segment-share:<?php echo number_format(($amount / $stackTotal) * 100, 4, '.', ''); ?>%" title="<?php echo htmlspecialchars($streetVisualization['definitions'][$categoryKey]['label'] . ': ' . number_format($amount, 2) . ' kg'); ?>"></span><?php endforeach; ?>
+                                        </div>
+                                        <span class="street-chart-x-label"><strong><?php echo htmlspecialchars($phaseRow['street']); ?></strong><small><?php echo htmlspecialchars($phaseRow['phase_name']); ?></small></span>
+                                    </div>
+                                <?php endforeach; ?>
+                                </div>
+                            </div>
+                            <div class="street-chart-axis street-chart-axis-x">Street / Phase</div>
+                        </div>
+                        <?php endif; ?>
+                        <details class="street-chart-table"><summary>View chart data as a table</summary><div class="table-scroll"><table><thead><tr><th>Phase</th><th>Street</th><?php foreach ($streetTableDefinitions as $definition): ?><th><?php echo htmlspecialchars($definition['label']); ?> (kg)</th><?php endforeach; ?><th>Total (kg)</th></tr></thead><tbody><?php foreach ($phaseStreetComparison as $phaseRow): ?><tr><td><?php echo htmlspecialchars($phaseRow['phase_name']); ?></td><td><?php echo htmlspecialchars($phaseRow['street']); ?></td><?php foreach ($streetTableDefinitions as $categoryKey => $definition): ?><td><?php echo number_format((float)($phaseRow['categories'][$categoryKey] ?? 0), 2); ?></td><?php endforeach; ?><td><?php echo number_format((float)$phaseRow['total_waste'], 2); ?></td></tr><?php endforeach; ?></tbody></table></div></details>
                     <?php endif; ?>
+                    </div>
+                    <script type="application/json" data-street-details-data><?php echo $streetDetailsJson; ?></script>
+                    <section class="street-detail-view" data-street-detail-view<?php echo $streetDetailSelection ? '' : ' hidden'; ?> aria-labelledby="street-detail-title">
+                        <a href="<?php echo htmlspecialchars($streetDetailBackUrl, ENT_QUOTES, 'UTF-8'); ?>" class="btn btn-cancel street-detail-back" data-street-detail-back>&larr; Back to Street Collection</a>
+                        <div data-street-detail-content<?php echo $streetDetailSelection ? '' : ' hidden'; ?>>
+                            <h3 id="street-detail-title" tabindex="-1">Street Collection Details</h3>
+                            <p class="street-detail-selection">Selected Street: <strong data-street-detail-street><?php echo htmlspecialchars($streetDetailSelection['street'] ?? ''); ?></strong><span aria-hidden="true">&middot;</span> Phase: <strong data-street-detail-phase><?php echo htmlspecialchars($streetDetailSelection['phase_name'] ?? ''); ?></strong></p>
+                            <article class="street-detail-total"><span>Total Waste Collected</span><strong data-street-detail-total><?php echo number_format((float)($streetDetailSelection['total_waste'] ?? 0), 2); ?> kg</strong></article>
+                            <section class="street-detail-breakdown" aria-labelledby="street-detail-breakdown-title">
+                                <h4 id="street-detail-breakdown-title">Waste Collected by Type</h4>
+                                <div class="street-detail-stack" data-street-detail-stack role="img" aria-label="Waste category breakdown for <?php echo htmlspecialchars($streetDetailSelection['street'] ?? 'selected street'); ?>"><?php foreach ($streetSelectedCategories as $detailCategory): ?><span style="--detail-share:<?php echo number_format((float)($detailCategory['percent'] ?? 0), 4, '.', ''); ?>%;--category-color:<?php echo htmlspecialchars($detailCategory['color'] ?? '#64748B'); ?>" title="<?php echo htmlspecialchars(($detailCategory['label'] ?? 'Waste type') . ': ' . number_format((float)($detailCategory['amount'] ?? 0), 2) . ' kg (' . number_format((float)($detailCategory['percent'] ?? 0), 1) . '%)'); ?>"></span><?php endforeach; ?></div>
+                                <div class="street-detail-category-list" data-street-detail-category-list><?php foreach ($streetSelectedCategories as $detailCategory): ?><div class="street-detail-category"><span class="street-detail-category-label"><i style="--category-color:<?php echo htmlspecialchars($detailCategory['color'] ?? '#64748B'); ?>"></i><span><?php echo htmlspecialchars($detailCategory['label'] ?? 'Waste type'); ?></span></span><strong class="street-detail-category-value"><?php echo number_format((float)($detailCategory['amount'] ?? 0), 2); ?> kg</strong><small class="street-detail-category-percent"><?php echo number_format((float)($detailCategory['percent'] ?? 0), 1); ?>%</small></div><?php endforeach; ?></div>
+                            </section>
+                        </div>
+                        <div class="empty-state" data-street-detail-empty hidden><strong>Street details are unavailable</strong><span>The selected street no longer matches the active filters. Return to the chart and select a displayed street.</span></div>
+                    </section>
                 </section>
 
                 <section class="viz-card" data-visualization-key="category">
@@ -1024,13 +1230,9 @@ include 'includes/sidebar.php'; ?>
                         <div class="donut-chart"
                              role="img"
                              aria-label="Waste category breakdown. Diversion rate: <?php echo $categoryVisualizationDiversionRate; ?> percent."
-                             style="--returnable: <?php echo number_format($categoryVisualizationPercentages['returnable'], 4, '.', ''); ?>%; --biowaste: <?php echo number_format($categoryVisualizationPercentages['biowaste'], 4, '.', ''); ?>%; --residual: <?php echo number_format($categoryVisualizationPercentages['residual'], 4, '.', ''); ?>%; --hazardous: <?php echo number_format($categoryVisualizationPercentages['hazardous'], 4, '.', ''); ?>%;"><span class="donut-chart-center" aria-hidden="true"><strong><?php echo $categoryVisualizationDiversionRate; ?>%</strong><span>Diversion rate</span></span></div>
+                             style="--returnable: <?php echo number_format($categoryVisualizationPercentages['returnable'], 4, '.', ''); ?>%; --biowaste: <?php echo number_format($categoryVisualizationPercentages['biowaste'], 4, '.', ''); ?>%; --residual: <?php echo number_format($categoryVisualizationPercentages['residual'], 4, '.', ''); ?>%; --hazardous: <?php echo number_format($categoryVisualizationPercentages['hazardous'], 4, '.', ''); ?>%; --category-returnable:<?php echo getWasteCategoryDefinitions(false)['returnable']['color']; ?>; --category-biowaste:<?php echo getWasteCategoryDefinitions(false)['biowaste']['color']; ?>; --category-residual:<?php echo getWasteCategoryDefinitions(false)['residual']['color']; ?>; --category-hazardous:<?php echo getWasteCategoryDefinitions(false)['hazardous']['color']; ?>;"><span class="donut-chart-center" aria-hidden="true"><strong><?php echo $categoryVisualizationDiversionRate; ?>%</strong><span>Diversion rate</span></span></div>
                         <div class="legend-list">
-                            <div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch: var(--eco-primary);"></span>Factory Returnable</span><strong><?php echo number_format((float)$categoryVisualizationSummary['returnable'], 2); ?> kg</strong></div>
-                            <div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch: var(--eco-blue);"></span>Biowaste</span><strong><?php echo number_format((float)$categoryVisualizationSummary['biowaste'], 2); ?> kg</strong></div>
-                            <div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch: var(--eco-amber);"></span>Residual</span><strong><?php echo number_format((float)$categoryVisualizationSummary['residual'], 2); ?> kg</strong></div>
-                            <div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch: var(--eco-danger);"></span>Hazardous</span><strong><?php echo number_format((float)$categoryVisualizationSummary['hazardous'], 2); ?> kg</strong></div>
-                            <div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch: #64748b;"></span>Unclassified</span><strong><?php echo number_format((float)($categoryVisualizationSummary['unclassified'] ?? 0), 2); ?> kg</strong></div>
+                            <?php foreach (getWasteCategoryDefinitions() as $categoryKey => $definition): ?><div class="legend-item"><span class="legend-key"><span class="legend-swatch" style="--swatch:<?php echo htmlspecialchars($definition['color']); ?>;"></span><?php echo htmlspecialchars($definition['label']); ?></span><strong><?php echo number_format((float)($categoryVisualizationSummary[$categoryKey] ?? 0), 2); ?> kg</strong></div><?php endforeach; ?>
                         </div>
                     </div>
                 </section>
@@ -1044,25 +1246,11 @@ include 'includes/sidebar.php'; ?>
                     'header_actions' => '<button type="button" class="explain-button" data-explanation-id="collection-trend" aria-label="View insights for Waste Collection Trend" title="View insights for this chart">&#9432;<span>View Insights</span></button>',
                 ]); ?>
 
-                <section class="viz-card" data-visualization-key="collector">
-                    <div class="viz-card-header"><h2>Collector Comparison</h2><div class="viz-card-header-actions"><button type="button" class="explain-button" data-explanation-id="collector-comparison" aria-label="View insights for Collector Comparison" title="View insights for this chart">&#9432;<span>View Insights</span></button><?php renderDashboardVisualizationYearControl('collector', $visualizationYearFilters['collector'], $visualizationYears, $visualizationYearFilters, 'Collector Comparison'); ?></div></div>
-                    <?php if (empty($collectorComparison)): ?>
-                        <div class="empty-state"><strong>No collector data yet</strong><span>Assign collectors to waste records to compare activity.</span></div>
-                    <?php else: ?>
-                        <div class="comparison-list">
-                            <?php foreach ($collectorComparison as $collectorIndex => $collectorRow): ?>
-                                <?php $barWidth = $maxCollectorWaste > 0 ? round(((float)$collectorRow['total_waste'] / $maxCollectorWaste) * 100) : 0;
-                                $barColor = $chartPalette[$collectorIndex % count($chartPalette)]; ?>
-                                <div class="comparison-row">
-                                    <div class="comparison-meta">
-                                        <span><?php echo htmlspecialchars($collectorRow['garbage_collector']); ?></span>
-                                        <span class="comparison-value"><?php echo number_format((float)$collectorRow['total_waste'], 2); ?> kg</span>
-                                    </div>
-                                    <div class="comparison-track"><div class="comparison-fill" style="--bar-width: <?php echo $barWidth; ?>%; --chart-color: <?php echo $barColor; ?>;"></div></div>
-                                </div>
-                            <?php endforeach; ?>
-                        </div>
-                    <?php endif; ?>
+                <section class="viz-card" data-visualization-key="attendance">
+                    <div class="viz-card-header"><div><h2>Attendance Management</h2><p class="chart-subtitle">Today&rsquo;s recorded collector attendance.</p></div><a class="btn btn-upload" href="admin_attendance.php">Manage attendance</a></div>
+                    <?php if ($attendanceDashboardAvailable): ?><div class="attendance-dashboard-summary" aria-label="Today attendance summary">
+                        <?php foreach (attendanceStatusOptions() as $attendanceKey => $attendanceLabel): ?><div><strong><?php echo (int)$attendanceDashboardSummary[$attendanceKey]; ?></strong><span class="attendance-status-<?php echo htmlspecialchars($attendanceKey); ?>"><?php echo htmlspecialchars($attendanceLabel); ?></span></div><?php endforeach; ?>
+                    </div><p><?php echo (int)$attendanceNotRecorded; ?> Not Recorded</p><?php else: ?><p>Attendance summary is temporarily unavailable.</p><?php endif; ?>
                 </section>
             </div>
 
@@ -1723,6 +1911,39 @@ include 'includes/sidebar.php'; ?>
           flex-wrap: wrap;
           gap: 8px;
         }
+        .chart-subtitle { margin: 5px 0 0; color: var(--eco-muted); font-size: 12px; }
+        .street-chart-legend { display: flex; flex-wrap: wrap; gap: 10px 14px; margin: 12px 0; color: var(--eco-text-soft); font-size: 12px; }
+        .street-chart-legend span { display: inline-flex; align-items: center; gap: 6px; }.street-chart-legend i { width: 11px; height: 11px; border-radius: 50%; background: var(--category-color); }
+        .street-chart-wrap { display: grid; grid-template-columns: 22px minmax(560px, 1fr); grid-template-rows: minmax(300px, 1fr) 24px; gap: 4px; overflow-x: auto; padding: 10px 4px; outline: none; }.street-chart-wrap:focus-visible { outline: 2px solid var(--eco-primary); outline-offset: 2px; }
+        .street-chart-axis { color: var(--eco-text-soft); font-size: 11px; font-weight: 700; }.street-chart-axis-y { writing-mode: vertical-rl; transform: rotate(180deg); text-align: center; }.street-chart-axis-x { grid-column: 2; text-align: center; }
+        .street-chart-plot { position: relative; min-height: 300px; padding-left: 40px; border-left: 1px solid var(--eco-border); border-bottom: 1px solid var(--eco-border); background: repeating-linear-gradient(to top, transparent 0, transparent calc(50% - 1px), var(--eco-border) 50%, transparent calc(50% + 1px)); }
+        .street-chart-grid { position: absolute; inset: 0 auto 0 5px; display: flex; flex-direction: column; justify-content: space-between; padding: 2px 0; color: var(--eco-text-soft); font-size: 10px; }.street-chart-bars { position: absolute; inset: 0 0 0 42px; display: flex; align-items: flex-end; gap: 14px; min-width: max-content; padding: 16px 8px 0; }
+        .street-chart-column { width: 118px; height: 100%; display: grid; grid-template-rows: 18px minmax(0,1fr) 42px; align-items: end; text-align: center; }.street-chart-value { font-size: 10px; color: var(--eco-text-soft); white-space: nowrap; }.street-chart-bar { width: 54px; height: var(--bar-height); min-height: 2px; align-self: end; justify-self: center; display: flex; flex-direction: column-reverse; overflow: hidden; border-radius: 6px 6px 0 0; background: var(--eco-border); cursor: help; }.street-chart-bar:focus-visible { outline: 2px solid var(--eco-primary); outline-offset: 3px; }.street-chart-bar span { display: block; width: 100%; height: var(--segment-share); background: var(--category-color); }
+        .street-chart-x-label { display: grid; gap: 2px; padding-top: 5px; overflow-wrap: anywhere; font-size: 11px; line-height: 1.15; }.street-chart-x-label small { color: var(--eco-text-soft); }.street-chart-table { margin-top: 12px; color: var(--eco-text-soft); font-size: 12px; }.street-chart-table summary { cursor: pointer; font-weight: 700; }.table-scroll { overflow: auto; }.street-chart-table table { width: 100%; border-collapse: collapse; margin-top: 10px; }.street-chart-table th,.street-chart-table td { padding: 7px; border-bottom: 1px solid var(--eco-border); text-align: left; white-space: nowrap; }
+        /* Waste Collection per Street: one compact Phase/category/month range row. */
+        section[data-visualization-key="area"] { container: street-chart-card / inline-size; }
+        .street-chart-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) auto; gap: 10px; align-items: end; margin: 14px 0 8px; padding: 12px; border-radius: 12px; background: color-mix(in srgb, var(--eco-surface-soft) 88%, #e4f4ec); }
+        .street-filter-field { display: grid; min-width: 0; gap: 6px; }
+        .street-filter-field[hidden] { display: none !important; }
+        .street-filter-field label, .street-filter-label { display: block; color: var(--eco-text-soft); font-size: 12px; font-weight: 700; }
+        .street-filter-field select { width: 100%; min-width: 0; min-height: 40px; padding: 8px 10px; border: 1px solid var(--eco-border); border-radius: 8px; background: var(--eco-surface); color: var(--eco-text); font: inherit; }
+        .street-filter-actions { display: flex; align-items: end; gap: 8px; }.street-filter-actions .btn { display: inline-flex; min-width: 84px; min-height: 40px; align-items: center; justify-content: center; padding-inline: 14px; white-space: nowrap; }
+        .street-filter-status { min-height: 20px; margin: 0 2px 12px; color: var(--eco-text-soft); font-size: 12px; }.street-filter-status.is-error { color: var(--eco-danger); font-weight: 700; }
+        .street-summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }.street-summary-grid article { min-width: 0; padding: 13px; border: 1px solid var(--eco-border); border-radius: 11px; background: var(--eco-surface-soft); box-shadow: 0 3px 10px rgba(11, 45, 35, 0.05); }.street-summary-grid span, .street-summary-grid small { display: block; color: var(--eco-text-soft); font-size: 11px; line-height: 1.35; }.street-summary-grid strong { display: block; margin: 5px 0; overflow: hidden; color: var(--eco-text); font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
+        .street-chart-modern-legend { margin: 14px 0 10px; }
+        .street-horizontal-chart { margin-top: 8px; }
+        .street-chart-rows { display: grid; gap: 11px; }.street-chart-row { display: grid; grid-template-columns: 170px minmax(0, 1fr) 78px auto; align-items: center; gap: 10px; }.street-chart-row-label { display: grid; min-width: 0; gap: 2px; color: inherit; text-decoration: none; }.street-chart-row-label strong, .street-chart-row-label small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.street-chart-row-label strong { font-size: 12px; }.street-chart-row-label small { color: var(--eco-text-soft); font-size: 11px; }button.street-chart-row-label, a.street-chart-row-label { width: 100%; padding: 0; border: 0; background: transparent; color: inherit; text-align: left; font: inherit; cursor: pointer; }.street-chart-details-button { display: inline-flex; width: auto !important; min-height: 30px; align-items: center; justify-content: center; padding: 5px 9px; border: 1px solid var(--eco-border); border-radius: 7px; background: var(--eco-surface-soft); color: var(--eco-primary-strong); font: 700 11px/1 "Segoe UI", Tahoma, Geneva, Verdana, sans-serif; text-decoration: none; white-space: nowrap; cursor: pointer; }.street-chart-details-button:hover { background: color-mix(in srgb, var(--eco-primary) 12%, var(--eco-surface-soft)); }.street-chart-details-button:focus-visible { outline: 2px solid var(--eco-primary); outline-offset: 3px; }
+        .street-chart-track { display: flex; min-width: 0; height: 30px; align-items: center; border-radius: 7px; background-image: linear-gradient(to right, color-mix(in srgb, var(--eco-border) 75%, transparent) 1px, transparent 1px); background-size: 25% 100%; }.street-chart-bar { display: flex; flex-direction: row; width: var(--bar-width); max-width: 100%; height: 22px; min-height: 0; margin: 0; padding: 0; overflow: hidden; border: 0; border-radius: 6px; background: var(--eco-border); cursor: pointer; transition: width 260ms ease, box-shadow 160ms ease, filter 160ms ease; }.street-chart-bar:focus-visible { outline: 2px solid var(--eco-primary); outline-offset: 3px; }.street-chart-bar span { display: block; width: var(--segment-share); height: 100%; flex: 0 0 var(--segment-share); background: var(--category-color); }.street-chart-row-value { color: var(--eco-text-soft); font-size: 11px; text-align: right; white-space: nowrap; }
+        .street-chart-detail-trigger:hover { filter: brightness(1.04); }.street-chart-bar.street-chart-detail-trigger:hover { box-shadow: 0 3px 8px rgba(11, 45, 35, 0.18); }.street-chart-row-label.street-chart-detail-trigger:hover strong { color: var(--eco-primary-strong); text-decoration: underline; text-underline-offset: 2px; }.street-chart-row-label.street-chart-detail-trigger:focus-visible { outline: 2px solid var(--eco-primary); outline-offset: 3px; border-radius: 3px; }
+        .street-chart-tooltip { position: fixed; z-index: 50; max-width: min(320px, calc(100vw - 24px)); padding: 9px 11px; border-radius: 8px; background: #163629; color: #fff; box-shadow: 0 8px 24px rgba(11, 45, 35, 0.25); font-size: 12px; line-height: 1.45; white-space: pre-line; pointer-events: none; }
+        .street-detail-view { display: grid; gap: 16px; padding-top: 14px; }.street-detail-view[hidden] { display: none !important; }.street-detail-back { justify-self: start; }.street-detail-view h3 { margin: 0; color: var(--eco-text); font-size: 20px; }.street-detail-selection { display: flex; flex-wrap: wrap; gap: 6px; margin: 7px 0 0; color: var(--eco-text-soft); font-size: 13px; }.street-detail-selection strong { color: var(--eco-text); }.street-detail-total { display: grid; gap: 5px; padding: 17px; border: 1px solid var(--eco-border); border-radius: 12px; background: var(--eco-surface-soft); }.street-detail-total span { color: var(--eco-text-soft); font-size: 12px; font-weight: 700; }.street-detail-total strong { color: var(--eco-text); font-size: 25px; }.street-detail-breakdown { display: grid; gap: 13px; }.street-detail-breakdown h4 { margin: 0; color: var(--eco-text); font-size: 15px; }.street-detail-stack { display: flex; min-height: 64px; overflow: hidden; border-radius: 8px; background: var(--eco-border); }.street-detail-stack:empty { display: none; }.street-detail-stack span { flex: 0 0 var(--detail-share); min-width: 0; background: var(--category-color); }.street-detail-category-list { display: grid; gap: 8px; }.street-detail-category { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--eco-border); }.street-detail-category-label { display: inline-flex; min-width: 0; align-items: center; gap: 8px; color: var(--eco-text); font-size: 13px; font-weight: 700; }.street-detail-category-label i { width: 11px; height: 11px; flex: 0 0 11px; border-radius: 50%; background: var(--category-color); }.street-detail-category-value { color: var(--eco-text); font-size: 13px; text-align: right; }.street-detail-category-percent { grid-column: 2; color: var(--eco-text-soft); font-size: 12px; text-align: right; }
+        @media (prefers-reduced-motion: reduce) { .street-chart-bar { transition: none; } }
+        @container street-chart-card (max-width: 760px) { .street-chart-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }.street-filter-actions { grid-column: 1 / -1; justify-content: flex-end; } }
+        @container street-chart-card (max-width: 480px) { .street-chart-filters { grid-template-columns: 1fr; }.street-filter-actions { grid-column: auto; width: 100%; }.street-filter-actions .btn { flex: 1 1 0; } }
+        @media (max-width: 920px) { .street-chart-filters { grid-template-columns: repeat(3, minmax(0, 1fr)); }.street-filter-actions { grid-column: 1 / -1; justify-content: flex-end; }.street-summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+        @media (max-width: 600px) { .street-chart-filters { grid-template-columns: 1fr; }.street-filter-actions { grid-column: auto; width: 100%; }.street-filter-actions .btn { flex: 1 1 0; }.street-chart-row { grid-template-columns: minmax(0, 1fr) 64px; gap: 6px; }.street-chart-row-label { grid-column: 1 / -1; }.street-chart-track { grid-column: 1; }.street-chart-row-value { grid-column: 2; }.street-chart-details-button { grid-column: 1 / -1; justify-self: start; }.street-summary-grid { grid-template-columns: 1fr; }.street-detail-category { grid-template-columns: minmax(0, 1fr) auto; }.street-detail-total strong { font-size: 22px; } }
+        .attendance-dashboard-summary { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 10px; margin-top: 18px; }.attendance-dashboard-summary div { padding: 12px; border: 1px solid var(--eco-border); border-radius: 9px; background: var(--eco-surface-soft); }.attendance-dashboard-summary strong { display: block; font-size: 22px; }.attendance-dashboard-summary span { font-size: 12px; font-weight: 700; }.attendance-status-present{color:#166534}.attendance-status-absent{color:#991b1b}.attendance-status-late{color:#92400e}.attendance-status-on_leave{color:#3730a3}
+        @media (max-width: 700px) { .street-chart-filters select { width: 100%; max-width: none; }.attendance-dashboard-summary { grid-template-columns: repeat(2,1fr); } .street-chart-wrap { grid-template-columns: 18px minmax(500px,1fr); } }
         .sr-only {
           position: absolute;
           width: 1px;
@@ -1967,6 +2188,30 @@ include 'includes/sidebar.php'; ?>
           align-items: center;
           justify-content: center;
         }
+        .street-detail-back {
+          min-height: 40px;
+          padding: 9px 14px;
+          border: 1px solid var(--eco-border);
+          border-radius: 8px;
+          background: var(--eco-surface-soft);
+          color: var(--eco-primary-strong);
+          box-shadow: 0 1px 2px rgba(11, 79, 67, 0.08);
+          font-weight: 700;
+          text-decoration: none;
+          text-transform: none;
+          transition: background-color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+        }
+        .street-detail-back:hover {
+          border-color: var(--eco-primary);
+          background: color-mix(in srgb, var(--eco-primary) 12%, var(--eco-surface));
+          color: var(--eco-primary-strong);
+          box-shadow: 0 4px 10px rgba(11, 79, 67, 0.13);
+          transform: translateX(-2px);
+        }
+        .street-detail-back:focus-visible {
+          outline: 3px solid color-mix(in srgb, var(--eco-primary) 35%, transparent);
+          outline-offset: 3px;
+        }
         .btn-gray {
           background: #9e9e9e;
           color: white;
@@ -2048,16 +2293,305 @@ include 'includes/sidebar.php'; ?>
           }
         }
 
-        async function refreshVisualization(form) {
-          const currentCard = form.closest("[data-visualization-key]");
-          if (!currentCard) {
-            form.submit();
-            return;
+        function initializeStreetFilters(root) {
+          const form = root.querySelector("[data-street-chart-filter]");
+          const phaseSelect = form && form.querySelector("#street-phase");
+          const categorySelect = form && form.querySelector("#street-category");
+          const periodSelect = form && form.querySelector("[data-street-period-mode]");
+          const monthInput = form && form.querySelector("#street-month");
+          const rangeStartMonth = form && form.querySelector("#street-range-start-month");
+          const rangeEndMonth = form && form.querySelector("#street-range-end-month");
+          const customStart = form && form.querySelector("#street-custom-start");
+          const customEnd = form && form.querySelector("#street-custom-end");
+          const status = form && form.parentElement.querySelector("#street-filter-status");
+          if (!form || !phaseSelect || !categorySelect || !periodSelect) return;
+
+          if (window.EcoTrackYearPicker) window.EcoTrackYearPicker.mountAll(form);
+          const showPeriodFields = () => {
+            const mode = periodSelect.value;
+            form.querySelectorAll("[data-street-period-field]").forEach((field) => {
+              const visible = field.dataset.streetPeriodField === mode;
+              field.hidden = !visible;
+              field.querySelectorAll("input, select").forEach((control) => { control.disabled = !visible; });
+            });
+          };
+          showPeriodFields();
+          let stateRequest = 0;
+          let stateTimer = 0;
+          const requestCalendarState = async (requestId) => {
+            const endpoint = form.dataset.streetFilterStateUrl;
+            if (!endpoint) return;
+            const requestUrl = new URL(endpoint, window.location.href);
+            requestUrl.searchParams.set("street_phase", phaseSelect.value);
+            requestUrl.searchParams.set("street_category", categorySelect.value);
+            try {
+              const response = await fetch(requestUrl.toString(), { cache: "no-store", credentials: "same-origin" });
+              const state = await response.json();
+              if (requestId !== stateRequest || !form.isConnected) return;
+              if (!response.ok || !state.calendar) throw new Error("Calendar state unavailable");
+              if (state.filters && state.filters.phase !== phaseSelect.value) phaseSelect.value = state.filters.phase || "";
+              if (window.EcoTrackYearPicker) {
+                [monthInput, rangeStartMonth, rangeEndMonth, customStart, customEnd].forEach((input) => {
+                  if (input) window.EcoTrackYearPicker.setAvailability(input, state.calendar);
+                });
+              }
+              const periodIsAvailable = (value) => {
+                const match = /^(\d{4})-(\d{2})/.exec(value || "");
+                if (!match) return false;
+                const months = state.calendar.months_by_year && state.calendar.months_by_year[match[1]];
+                return Array.isArray(months) && months.map(Number).includes(Number(match[2]));
+              };
+              let cleared = false;
+              [monthInput, rangeStartMonth, rangeEndMonth, customStart, customEnd].forEach((input) => {
+                if (!input || !input.value || periodIsAvailable(input.value)) return;
+                input.value = "";
+                if (window.EcoTrackYearPicker) window.EcoTrackYearPicker.sync(input);
+                cleared = true;
+              });
+              if (cleared && status) {
+                status.classList.remove("is-error");
+                status.textContent = "Unavailable month or date selections were cleared for the current filters.";
+              }
+            } catch (error) {
+              if (requestId === stateRequest && form.isConnected && status) {
+                status.classList.add("is-error");
+                status.textContent = "Calendar availability could not be updated. Apply filters to retry.";
+              }
+            }
+          };
+          const queueCalendarState = () => {
+            window.clearTimeout(stateTimer);
+            const requestId = ++stateRequest;
+            stateTimer = window.setTimeout(() => requestCalendarState(requestId), 120);
+          };
+          const cancelCalendarState = () => {
+            window.clearTimeout(stateTimer);
+            stateRequest++;
+          };
+          phaseSelect.addEventListener("change", queueCalendarState);
+          categorySelect.addEventListener("change", queueCalendarState);
+          periodSelect.addEventListener("change", showPeriodFields);
+          form.addEventListener("submit", cancelCalendarState);
+          const reset = form.querySelector("[data-street-filter-reset]");
+          if (reset) reset.addEventListener("click", () => {
+            cancelCalendarState();
+            phaseSelect.value = "";
+            categorySelect.value = "all";
+            periodSelect.value = "all";
+            [monthInput, rangeStartMonth, rangeEndMonth, customStart, customEnd].forEach((input) => { if (input) { input.value = ""; if (window.EcoTrackYearPicker) window.EcoTrackYearPicker.sync(input); } });
+            showPeriodFields();
+            refreshVisualization(form, { successMessage: "Street filters reset." });
+          });
+        }
+
+        function initializeStreetChartTooltips(root) {
+          const tooltip = root.querySelector("[data-street-chart-tooltip]");
+          if (!tooltip) return;
+          const hideTooltip = () => { tooltip.hidden = true; };
+          const showTooltip = (target) => {
+            tooltip.textContent = target.dataset.streetTooltip || "";
+            tooltip.hidden = false;
+            const rect = target.getBoundingClientRect();
+            tooltip.style.left = Math.min(window.innerWidth - tooltip.offsetWidth - 10, Math.max(10, rect.left)) + "px";
+            tooltip.style.top = Math.max(10, rect.top - tooltip.offsetHeight - 8) + "px";
+          };
+          root.querySelectorAll("[data-street-tooltip]").forEach((bar) => {
+            bar.addEventListener("pointerenter", () => showTooltip(bar));
+            bar.addEventListener("focus", () => showTooltip(bar));
+            bar.addEventListener("pointerleave", hideTooltip);
+            bar.addEventListener("blur", hideTooltip);
+          });
+        }
+
+        function initializeStreetDetails(root) {
+          const mainView = root.querySelector("[data-street-main-view]");
+          const detailView = root.querySelector("[data-street-detail-view]");
+          const dataElement = root.querySelector("[data-street-details-data]");
+          const content = detailView && detailView.querySelector("[data-street-detail-content]");
+          const empty = detailView && detailView.querySelector("[data-street-detail-empty]");
+          const back = detailView && detailView.querySelector("[data-street-detail-back]");
+          const title = detailView && detailView.querySelector("#street-detail-title");
+          const street = detailView && detailView.querySelector("[data-street-detail-street]");
+          const phase = detailView && detailView.querySelector("[data-street-detail-phase]");
+          const total = detailView && detailView.querySelector("[data-street-detail-total]");
+          const stack = detailView && detailView.querySelector("[data-street-detail-stack]");
+          const categoryList = detailView && detailView.querySelector("[data-street-detail-category-list]");
+          if (!mainView || !detailView || !dataElement || !content || !empty || !back || !title || !street || !phase || !total || !stack || !categoryList) return;
+
+          let details = {};
+          try {
+            const parsed = JSON.parse(dataElement.textContent || "{}");
+            if (parsed && typeof parsed === "object") details = parsed;
+          } catch (error) {
+            details = {};
           }
 
+          const formatKg = (value) => {
+            const amount = Number(value);
+            return (Number.isFinite(amount) ? amount : 0).toLocaleString(undefined, {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            }) + " kg";
+          };
+          const formatPercent = (value) => {
+            const percent = Number(value);
+            return (Number.isFinite(percent) ? percent : 0).toLocaleString(undefined, {
+              minimumFractionDigits: 1,
+              maximumFractionDigits: 1,
+            }) + "%";
+          };
+          const setUnavailable = () => {
+            content.hidden = true;
+            empty.hidden = false;
+            stack.replaceChildren();
+            categoryList.replaceChildren();
+          };
+          const renderDetail = (detail) => {
+            const categories = detail && detail.categories && typeof detail.categories === "object"
+              ? Object.keys(detail.categories).map((key) => Object.assign({ key }, detail.categories[key] || {}))
+              : [];
+            if (!detail || !detail.key || !categories.length || Number(detail.total_waste) <= 0) {
+              setUnavailable();
+              return false;
+            }
+
+            content.hidden = false;
+            empty.hidden = true;
+            street.textContent = detail.street || "Selected street";
+            phase.textContent = detail.phase_name || "Unassigned phase";
+            total.textContent = formatKg(detail.total_waste);
+            stack.replaceChildren();
+            categoryList.replaceChildren();
+
+            const accessibleCategories = [];
+            categories.forEach((category) => {
+              const amount = Number(category.amount) || 0;
+              const percent = Math.max(0, Math.min(100, Number(category.percent) || 0));
+              const label = category.label || category.key;
+              const color = category.color || "#64748B";
+              accessibleCategories.push(label + " " + formatKg(amount) + " (" + formatPercent(percent) + ")");
+
+              const segment = document.createElement("span");
+              segment.style.setProperty("--detail-share", percent + "%");
+              segment.style.setProperty("--category-color", color);
+              segment.title = label + ": " + formatKg(amount) + " (" + formatPercent(percent) + ")";
+              stack.appendChild(segment);
+
+              const item = document.createElement("div");
+              item.className = "street-detail-category";
+              const itemLabel = document.createElement("span");
+              itemLabel.className = "street-detail-category-label";
+              const swatch = document.createElement("i");
+              swatch.style.setProperty("--category-color", color);
+              const labelText = document.createElement("span");
+              labelText.textContent = label;
+              itemLabel.append(swatch, labelText);
+              const value = document.createElement("strong");
+              value.className = "street-detail-category-value";
+              value.textContent = formatKg(amount);
+              const percentText = document.createElement("small");
+              percentText.className = "street-detail-category-percent";
+              percentText.textContent = formatPercent(percent);
+              item.append(itemLabel, value, percentText);
+              categoryList.appendChild(item);
+            });
+            stack.setAttribute("aria-label", "Waste category breakdown for " + (detail.street || "selected street") + ": " + accessibleCategories.join(", ") + ".");
+            return true;
+          };
+
+          let returnTrigger = null;
+          const openDetail = (trigger) => {
+            const detail = details[trigger.dataset.streetDetailKey || ""];
+            returnTrigger = trigger;
+            const rendered = renderDetail(detail);
+            mainView.hidden = true;
+            detailView.hidden = false;
+            const tooltip = root.querySelector("[data-street-chart-tooltip]");
+            if (tooltip) tooltip.hidden = true;
+            detailView.scrollIntoView({ block: "start" });
+            title.focus();
+            return rendered;
+          };
+          const closeDetail = () => {
+            detailView.hidden = true;
+            mainView.hidden = false;
+            if (returnTrigger && returnTrigger.isConnected) returnTrigger.focus();
+          };
+
+          root.querySelectorAll("[data-street-detail-trigger]").forEach((trigger) => {
+            trigger.addEventListener("click", (event) => {
+              event.preventDefault();
+              openDetail(trigger);
+            });
+          });
+          back.addEventListener("click", (event) => {
+            event.preventDefault();
+            closeDetail();
+          });
+        }
+
+        function initializeStreetVisualization(root) {
+          // Street drill-down is intentionally initialized first so a problem
+          // in an optional filter enhancement cannot make chart rows inert.
+          initializeStreetDetails(root);
+          initializeStreetFilters(root);
+          initializeStreetChartTooltips(root);
+        }
+
+        function streetFilterSnapshot(values) {
+          if (!values) return null;
+          return {
+            phase: values.get("street_phase") || "",
+            category: values.get("street_category") || "all",
+            period: values.get("street_period") || "all",
+            rangeStart: values.get("street_range_start_month") || "",
+            rangeEnd: values.get("street_range_end_month") || "",
+            customStart: values.get("street_custom_start") || "",
+            customEnd: values.get("street_custom_end") || "",
+          };
+        }
+
+        function streetFilterAdjustment(before, after) {
+          if (!before || !after) return "";
+          const changes = [];
+          if (before.phase && before.phase !== after.phase) changes.push("phase");
+          if (before.category !== after.category) changes.push("waste category");
+          if (before.period !== after.period) changes.push("period");
+          if (before.rangeStart && before.rangeStart !== after.rangeStart) changes.push("month range start");
+          if (before.rangeEnd && before.rangeEnd !== after.rangeEnd) changes.push("month range end");
+          if (before.customStart && before.customStart !== after.customStart) changes.push("custom start date");
+          if (before.customEnd && before.customEnd !== after.customEnd) changes.push("custom end date");
+          return changes.length ? "Unavailable " + changes.join(", ") + " filter" + (changes.length > 1 ? "s were" : " was") + " adjusted." : "";
+        }
+
+        async function refreshVisualization(form, refreshOptions = {}) {
+          // Capture successful controls before temporarily disabling them. Disabled
+          // form controls are intentionally omitted by FormData, which would make
+          // Phase and Waste Category silently revert to their all-data values.
+          const submittedFormData = new FormData(form);
           const requestUrl = new URL(form.action || window.location.href, window.location.href);
-          requestUrl.search = new URLSearchParams(new FormData(form)).toString();
+          requestUrl.search = new URLSearchParams(submittedFormData).toString();
+          const currentCard = form.closest("[data-visualization-key]");
+          if (!currentCard) {
+            window.location.assign(requestUrl.toString());
+            return false;
+          }
+
+          const isStreetFilter = form.matches("[data-street-chart-filter]");
+          const previousStreetFilters = isStreetFilter ? streetFilterSnapshot(submittedFormData) : null;
+          if (isStreetFilter && form.dataset.streetRefreshInFlight === "true") return false;
+          if (isStreetFilter) {
+            form.dataset.streetRefreshInFlight = "true";
+              form.querySelectorAll("button, select, input").forEach((control) => { control.disabled = true; });
+          }
+
+          const streetStatus = isStreetFilter ? form.parentElement.querySelector("#street-filter-status") : null;
+          if (streetStatus) {
+            streetStatus.classList.remove("is-error");
+            streetStatus.textContent = "Updating street collection data…";
+          }
           currentCard.classList.add("visualization-loading");
+          currentCard.setAttribute("aria-busy", "true");
           try {
             const response = await fetch(requestUrl.toString(), { headers: { "X-Requested-With": "XMLHttpRequest" } });
             if (!response.ok) throw new Error("Unable to refresh this visualization.");
@@ -2074,10 +2608,40 @@ include 'includes/sidebar.php'; ?>
             }
             currentCard.replaceWith(replacementCard);
             if (window.EcoTrackYearPicker) window.EcoTrackYearPicker.mountAll(replacementCard);
-            window.history.replaceState({}, "", requestUrl);
+            initializeStreetVisualization(replacementCard);
+            const refreshedForm = replacementCard.querySelector("[data-street-chart-filter]");
+            const refreshedStatus = replacementCard.querySelector("#street-filter-status");
+            const adjustment = streetFilterAdjustment(previousStreetFilters, refreshedForm ? new FormData(refreshedForm) : null);
+            const successMessage = refreshOptions.successMessage || (isStreetFilter ? "Street filters applied." : "");
+            if (refreshedStatus && (successMessage || adjustment)) {
+              refreshedStatus.classList.remove("is-error");
+              refreshedStatus.textContent = [successMessage, adjustment].filter(Boolean).join(" ");
+            }
+            if (refreshOptions.updateHistory !== false) window.history.replaceState({}, "", requestUrl);
+            return true;
           } catch (error) {
-            // Fall back to a full request when in-place refresh fails.
-            form.submit();
+            if (streetStatus) {
+              streetStatus.classList.add("is-error");
+              streetStatus.textContent = "Street data could not be refreshed. Check your connection and try again.";
+            } else {
+              // Other existing dashboard controls retain their full-page fallback.
+              window.location.assign(requestUrl.toString());
+            }
+            return false;
+          } finally {
+            currentCard.classList.remove("visualization-loading");
+            currentCard.removeAttribute("aria-busy");
+            if (isStreetFilter) {
+              form.dataset.streetRefreshInFlight = "false";
+              form.querySelectorAll("button, select, input").forEach((control) => { control.disabled = false; });
+              if (isStreetFilter) {
+                const mode = form.querySelector("[data-street-period-mode]");
+                form.querySelectorAll("[data-street-period-field]").forEach((field) => {
+                  const visible = mode && field.dataset.streetPeriodField === mode.value;
+                  field.querySelectorAll("input, select").forEach((control) => { control.disabled = !visible; });
+                });
+              }
+            }
           }
         }
 
@@ -2087,6 +2651,8 @@ include 'includes/sidebar.php'; ?>
           event.preventDefault();
           refreshVisualization(form);
         });
+
+        initializeStreetVisualization(document);
 
         document.addEventListener("click", (event) => {
           const button = event.target.closest(".explain-button[data-explanation-id]");
@@ -2100,19 +2666,34 @@ include 'includes/sidebar.php'; ?>
         });
         const dashboardLoadedAt = Date.now();
         let dashboardWasteVersion = Number(<?php echo json_encode((int)($wasteDataState['version'] ?? 0)); ?>);
+        let streetVersionRefreshInFlight = false;
+        function refreshStreetCardForDataVersion() {
+          if (streetVersionRefreshInFlight) return;
+          const form = document.querySelector("[data-street-chart-filter]");
+          if (!form) return;
+          streetVersionRefreshInFlight = true;
+          refreshVisualization(form, { successMessage: "Street collection data updated from the latest import." })
+            .then((refreshed) => {
+              if (refreshed && activeExplanationId === "waste-household") loadChartExplanation(activeExplanationId);
+            })
+            .finally(() => { streetVersionRefreshInFlight = false; });
+        }
         async function refreshDashboardDataVersion() {
-          if (document.hidden || explanationPanel.classList.contains("is-open")) return;
+          if (document.hidden) return;
           try {
             const response = await fetch("waste_data_version.php", { cache: "no-store", credentials: "same-origin" });
             const state = await response.json();
-            if (response.ok && Number(state.version || 0) > dashboardWasteVersion) window.location.reload();
+            if (response.ok && Number(state.version || 0) > dashboardWasteVersion) {
+              dashboardWasteVersion = Number(state.version || 0);
+              refreshStreetCardForDataVersion();
+            }
           } catch (error) {
             // Cross-tab storage still gives immediate refreshes; retry later.
           }
         }
         window.addEventListener("storage", (event) => {
           if (event.key === "ecotrackWasteDataUpdated" && Number(event.newValue || 0) > dashboardLoadedAt) {
-            window.location.reload();
+            refreshDashboardDataVersion();
           }
         });
         explanationPanel.querySelector(".explanation-close").addEventListener("click", closeChartExplanation);

@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once 'includes/attendance_management.php';
 requireUserType('admin');
 $userManagementRoute = 'admin_user_management.php';
 if (empty($canonicalRouteEntry) && $_SERVER['REQUEST_METHOD'] === 'GET') {
@@ -17,11 +18,62 @@ $_SESSION['last_activity'] = time();
 
 $conn = getDBConnection();
 ensureReportsTable($conn);
+if (!$conn) {
+    http_response_code(503);
+    exit('User management is temporarily unavailable.');
+}
+ensureWasteCollectorAccountSchema($conn);
+syncBioCollectors($conn);
 $currentAdmin = getCurrentUser();
 $currentAdminId = (int)($currentAdmin['id'] ?? 0);
 $message = '';
 $error = '';
 $newlyAddedUserId = 0;
+
+// All role and status changes take the same locks before checking the final admin.
+function lockActiveAdministratorIds(PDO $conn): array
+{
+    $stmt = $conn->query("SELECT id FROM users WHERE user_type = 'admin' AND is_active = 1 ORDER BY id FOR UPDATE");
+    return array_map('intval', $stmt->fetchAll(PDO::FETCH_COLUMN));
+}
+
+/** Atomically link a collector account to one registry identity, never a posted name alone. */
+function linkWasteCollectorAccount(PDO $conn, int $userId, int $collectorId, string $newCollectorName = ''): void
+{
+    if ($collectorId > 0) {
+        $lookup = $conn->prepare('SELECT id, user_id FROM bio_collectors WHERE id = ? AND (is_active = 1 OR user_id = ?) FOR UPDATE');
+        $lookup->execute([$collectorId, $userId]);
+        $collector = $lookup->fetch(PDO::FETCH_ASSOC);
+        if (!$collector) throw new InvalidArgumentException('Choose an active Waste Collector record.');
+        if ($collector['user_id'] !== null && (int)$collector['user_id'] !== $userId) {
+            throw new InvalidArgumentException('That Waste Collector is already linked to another account.');
+        }
+        if ($collector['user_id'] !== null && (int)$collector['user_id'] === $userId) return;
+    } else {
+        $newCollectorName = attendanceName($newCollectorName);
+        if ($newCollectorName === '') throw new InvalidArgumentException('Select an existing Waste Collector or enter a new collector name.');
+        if (strlen($newCollectorName) > 255) throw new InvalidArgumentException('Collector name must be 255 characters or fewer.');
+        $key = attendanceNameKey($newCollectorName);
+        $lookup = $conn->prepare('SELECT id, user_id FROM bio_collectors WHERE name_key = ? FOR UPDATE');
+        $lookup->execute([$key]);
+        $collector = $lookup->fetch(PDO::FETCH_ASSOC);
+        if ($collector) {
+            if ($collector['user_id'] !== null && (int)$collector['user_id'] !== $userId) {
+                throw new InvalidArgumentException('A collector with that name is already linked to another account.');
+            }
+            $collectorId = (int)$collector['id'];
+        } else {
+            $insert = $conn->prepare('INSERT INTO bio_collectors (name, name_key, user_id) VALUES (?, ?, ?)');
+            $insert->execute([$newCollectorName, $key, $userId]);
+            return;
+        }
+    }
+    $unlink = $conn->prepare('UPDATE bio_collectors SET user_id = NULL WHERE user_id = ? AND id <> ?');
+    $unlink->execute([$userId, $collectorId]);
+    $link = $conn->prepare('UPDATE bio_collectors SET user_id = ? WHERE id = ? AND (user_id IS NULL OR user_id = ?)');
+    $link->execute([$userId, $collectorId, $userId]);
+    if ($link->rowCount() !== 1) throw new RuntimeException('Unable to link the Waste Collector account.');
+}
 
 // Handle Add User
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_user'])) {
@@ -31,12 +83,27 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_user'])) {
     $last_name = trim($_POST['last_name'] ?? '');
     $user_type = trim($_POST['user_type'] ?? 'staff');
     $password = trim($_POST['password'] ?? '');
+    $confirm_password = trim($_POST['confirm_password'] ?? '');
     $address = trim($_POST['address'] ?? '');
     $gender = trim($_POST['gender'] ?? '');
+    // A new collector account always uses its required account name for its
+    // linked collector identity. This also safely reuses an unlinked matching
+    // registry record, preserving its attendance history without exposing a
+    // second, confusing name field in the creation form.
+    $collectorId = 0;
+    $newCollectorName = trim($first_name . ' ' . $last_name);
 
     if (empty($username) || empty($email) || empty($first_name) || empty($last_name) || empty($password)) {
         $error = "Please fill in all required fields.";
-    } elseif (!in_array($user_type, ['admin', 'staff'], true)) {
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = 'Please enter a valid email address.';
+    } elseif (strlen($username) > 50) {
+        $error = 'Username must be 50 characters or fewer.';
+    } elseif (strlen($password) < 8) {
+        $error = 'Password must be at least 8 characters.';
+    } elseif (!hash_equals($password, $confirm_password)) {
+        $error = 'Passwords do not match.';
+    } elseif (!in_array($user_type, ['admin', 'staff', 'waste_collector'], true)) {
         $error = 'Please select a valid account role.';
     } else {
         try {
@@ -52,15 +119,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['add_user'])) {
                 if ($photo === false) {
                     $error = $photoError;
                 } else {
+                    $conn->beginTransaction();
                     $stmt = $conn->prepare("INSERT INTO users (username, email, password_hash, first_name, last_name, user_type, photo, address, gender, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)");
                     $stmt->execute([$username, $email, $password_hash, $first_name, $last_name, $user_type, $photo, $address, $gender]);
                     $newlyAddedUserId = (int)$conn->lastInsertId();
-                    $message = ucfirst($user_type) . " account added successfully!";
+                    if ($user_type === 'waste_collector') {
+                        linkWasteCollectorAccount($conn, $newlyAddedUserId, $collectorId, $newCollectorName);
+                    }
+                    $conn->commit();
+                    $message = $user_type === 'waste_collector' ? 'Waste Collector account added successfully!' : ucfirst($user_type) . " account added successfully!";
                     logActivity('Added user: ' . $username, 'Users', 'Success', $conn);
                 }
             }
-        } catch (PDOException $e) {
-            $error = "Failed to add user.";
+        } catch (Throwable $e) {
+            if ($conn->inTransaction()) $conn->rollBack();
+            $error = $e instanceof InvalidArgumentException ? $e->getMessage() : "Failed to add user.";
             logActivity('Added user: ' . $username, 'Users', 'Failed', $conn);
         }
     }
@@ -76,6 +149,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
     $user_type = trim($_POST['user_type'] ?? 'staff');
     $address = trim($_POST['address'] ?? '');
     $gender = trim($_POST['gender'] ?? '');
+    $collectorId = filter_var($_POST['collector_id'] ?? null, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]) ?: 0;
 
     if (empty($username) || empty($email) || empty($first_name) || empty($last_name)) {
         $error = "Please fill in all required fields.";
@@ -83,13 +157,21 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
         $error = 'Username must be 50 characters or fewer.';
     } else {
         try {
-            $existingStmt = $conn->prepare('SELECT id, username, email, user_type, is_active FROM users WHERE id = ?');
+            $conn->beginTransaction();
+            $activeAdminIds = lockActiveAdministratorIds($conn);
+            $existingStmt = $conn->prepare('SELECT id, username, email, user_type, is_active FROM users WHERE id = ? FOR UPDATE');
             $existingStmt->execute([$user_id]);
             $existingUser = $existingStmt->fetch();
-            if (!$existingUser) {
+            if (!in_array($currentAdminId, $activeAdminIds, true)) {
+                $error = 'Your administrator access has changed. Sign in again to continue.';
+            } elseif (!$existingUser) {
                 $error = 'The selected account no longer exists.';
-            } elseif (!in_array($user_type, ['admin', 'staff'], true)) {
+            } elseif (!in_array($user_type, ['admin', 'staff', 'waste_collector'], true)) {
                 $error = 'Please select a valid account role.';
+            } elseif ($existingUser['user_type'] === 'waste_collector' && $user_type !== 'waste_collector') {
+                $error = 'Waste Collector accounts must remain linked to their collector record.';
+            } elseif ($existingUser['user_type'] !== 'waste_collector' && $user_type === 'waste_collector') {
+                $error = 'Create Waste Collector accounts with the dedicated Add Waste Collector action.';
             } elseif ($user_id === $currentAdminId && $user_type !== $existingUser['user_type']) {
                 $error = 'Use another active administrator to change your own account role.';
             } else {
@@ -99,8 +181,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
                     $error = 'That username or email address is already in use.';
                 } else {
                     if ($existingUser['user_type'] === 'admin' && $user_type !== 'admin' && (int)$existingUser['is_active'] === 1) {
-                        $adminCount = (int)$conn->query("SELECT COUNT(*) FROM users WHERE user_type = 'admin' AND is_active = 1")->fetchColumn();
-                        if ($adminCount <= 1) {
+                        if (count($activeAdminIds) <= 1) {
                             $error = 'At least one active administrator account must remain.';
                         }
                     }
@@ -121,6 +202,10 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
                         if ($error === '') {
                             $stmt = $conn->prepare("UPDATE users SET username = ?, email = ?, first_name = ?, last_name = ?, user_type = ?, address = ?, gender = ? $photo_update WHERE id = ?");
                             $stmt->execute($params);
+                            if ($existingUser['user_type'] === 'waste_collector') {
+                                linkWasteCollectorAccount($conn, $user_id, $collectorId);
+                            }
+                            $conn->commit();
                             $message = "Account updated successfully!";
                             logActivity('Edited user: ' . $username, 'Users', 'Success', $conn);
                             if ($existingUser['username'] !== $username) {
@@ -133,7 +218,13 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
                     }
                 }
             }
-        } catch (PDOException $e) {
+            if ($conn->inTransaction()) {
+                $conn->rollBack();
+            }
+        } catch (Throwable $e) {
+            if ($conn && $conn->inTransaction()) {
+                $conn->rollBack();
+            }
             $error = "Failed to update user.";
             logActivity('Edited user (ID ' . $user_id . ')', 'Users', 'Failed', $conn);
         }
@@ -144,25 +235,28 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['edit_user'])) {
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['deactivate_user'])) {
     $user_id = intval($_POST['user_id'] ?? 0);
     try {
-        $accountStmt = $conn->prepare('SELECT username, user_type, is_active FROM users WHERE id = ?');
+        // Prepare the token table before the transaction: DDL would commit it.
+        if (!ensurePersistentLoginTokensTable($conn)) {
+            throw new RuntimeException('Unable to prepare remembered login storage.');
+        }
+        $conn->beginTransaction();
+        $activeAdminIds = lockActiveAdministratorIds($conn);
+        $accountStmt = $conn->prepare('SELECT username, user_type, is_active FROM users WHERE id = ? FOR UPDATE');
         $accountStmt->execute([$user_id]);
         $account = $accountStmt->fetch();
-        if (!$account) {
+        if (!in_array($currentAdminId, $activeAdminIds, true)) {
+            $error = 'Your administrator access has changed. Sign in again to continue.';
+        } elseif (!$account) {
             $error = 'The selected account no longer exists.';
         } elseif ($user_id === $currentAdminId) {
             $error = 'You cannot deactivate your own account from User Management.';
         } elseif ($account['user_type'] === 'admin' && (int)$account['is_active'] === 1) {
-            $activeAdminCount = (int)$conn->query("SELECT COUNT(*) FROM users WHERE user_type = 'admin' AND is_active = 1")->fetchColumn();
-            if ($activeAdminCount <= 1) {
+            if (count($activeAdminIds) <= 1) {
                 $error = 'At least one active administrator account must remain.';
             }
         }
 
         if ($error === '') {
-            if (!ensurePersistentLoginTokensTable($conn)) {
-                throw new RuntimeException('Unable to prepare remembered login storage.');
-            }
-            $conn->beginTransaction();
             $stmt = $conn->prepare("UPDATE users SET is_active = NOT is_active WHERE id = ?");
             $stmt->execute([$user_id]);
             if ((int)$account['is_active'] === 1 && !revokePersistentLoginsForUser($conn, $user_id)) {
@@ -171,6 +265,8 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['deactivate_user'])) {
             $conn->commit();
             $message = "Account status updated successfully!";
             logActivity('Changed user status: ' . $account['username'], 'Users', 'Success', $conn);
+        } else {
+            $conn->rollBack();
         }
     } catch (Throwable $e) {
         if ($conn && $conn->inTransaction()) {
@@ -185,11 +281,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['deactivate_user'])) {
 if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['reset_password'])) {
     $user_id = intval($_POST['user_id'] ?? 0);
     $new_password = trim($_POST['new_password'] ?? '');
+    $confirm_password = trim($_POST['confirm_password'] ?? '');
 
     if ($user_id === $currentAdminId) {
         $error = 'Use the Password tab in Settings to change your own password.';
-    } elseif (empty($new_password) || strlen($new_password) < 6) {
-        $error = "Password must be at least 6 characters.";
+    } elseif (empty($new_password) || strlen($new_password) < 8) {
+        $error = "Password must be at least 8 characters.";
+    } elseif (!hash_equals($new_password, $confirm_password)) {
+        $error = 'Passwords do not match.';
     } else {
         try {
             $password_hash = password_hash($new_password, PASSWORD_DEFAULT);
@@ -215,7 +314,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST' && isset($_POST['reset_password'])) {
     }
 }
 
-// Fetch all staff and administrator accounts for the directory.
+// Fetch every account role for the directory.
 $userSearch = trim($_GET['search'] ?? '');
 $roleFilter = trim($_GET['role'] ?? '');
 $statusFilter = trim($_GET['status'] ?? '');
@@ -228,7 +327,7 @@ try {
         $term = '%' . $userSearch . '%';
         array_push($params, $term, $term, $term, $term, $term);
     }
-    if (in_array($roleFilter, ['admin', 'staff'], true)) {
+    if (in_array($roleFilter, ['admin', 'staff', 'waste_collector'], true)) {
         $where[] = 'user_type = ?';
         $params[] = $roleFilter;
     }
@@ -241,19 +340,21 @@ try {
     if ($where) {
         $sql .= ' WHERE ' . implode(' AND ', $where);
     }
-    $sql .= " ORDER BY FIELD(user_type, 'admin', 'staff'), first_name ASC, last_name ASC, username ASC";
+    $sql .= " ORDER BY FIELD(user_type, 'admin', 'staff', 'waste_collector'), first_name ASC, last_name ASC, username ASC";
     $stmt = $conn->prepare($sql);
     $stmt->execute($params);
     $users = $stmt->fetchAll();
 } catch (PDOException $e) {
     $error = "Failed to load users.";
 }
-$directorySummary = ['total' => count($users), 'admin' => 0, 'staff' => 0, 'active' => 0];
+$directorySummary = ['total' => count($users), 'admin' => 0, 'staff' => 0, 'waste_collector' => 0, 'active' => 0];
 foreach ($users as $directoryUser) {
     if (($directoryUser['user_type'] ?? '') === 'admin') {
         $directorySummary['admin']++;
     } elseif (($directoryUser['user_type'] ?? '') === 'staff') {
         $directorySummary['staff']++;
+    } elseif (($directoryUser['user_type'] ?? '') === 'waste_collector') {
+        $directorySummary['waste_collector']++;
     }
     if (!empty($directoryUser['is_active'])) {
         $directorySummary['active']++;
@@ -269,7 +370,7 @@ $selectedUserId = isset($_GET['user_id']) ? (int)$_GET['user_id'] : $newlyAddedU
 if ($selectedUserId > 0) {
     $user_id = $selectedUserId;
     try {
-        $stmt = $conn->prepare("SELECT * FROM users WHERE id = ?");
+        $stmt = $conn->prepare("SELECT u.*, c.id AS collector_id, c.name AS collector_name FROM users u LEFT JOIN bio_collectors c ON c.user_id = u.id WHERE u.id = ?");
         $stmt->execute([$user_id]);
         $selected_user = $stmt->fetch();
     } catch (PDOException $e) {
@@ -278,6 +379,16 @@ if ($selectedUserId > 0) {
 }
 if (!$selected_user && !empty($users)) {
     $selected_user = $users[0];
+}
+
+$collectorOptions = [];
+try {
+    $currentCollectorId = (int)($selected_user['collector_id'] ?? 0);
+    $stmt = $conn->prepare('SELECT id, name, user_id, is_active FROM bio_collectors WHERE (is_active = 1 AND user_id IS NULL) OR id = ? ORDER BY name, id');
+    $stmt->execute([$currentCollectorId]);
+    $collectorOptions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+} catch (PDOException $e) {
+    $error = $error ?: 'Waste Collector records could not be loaded.';
 }
 
 $selectedUserStats = ['assigned_tasks' => 0, 'completed_tasks' => 0, 'submitted_reports' => 0];
@@ -943,6 +1054,7 @@ include 'includes/sidebar.php'; ?>
             <article class="directory-stat"><span>Accounts shown</span><strong><?php echo (int)$directorySummary['total']; ?></strong></article>
             <article class="directory-stat"><span>Administrators</span><strong><?php echo (int)$directorySummary['admin']; ?></strong></article>
             <article class="directory-stat"><span>Staff accounts</span><strong><?php echo (int)$directorySummary['staff']; ?></strong></article>
+            <article class="directory-stat"><span>Waste Collectors</span><strong><?php echo (int)$directorySummary['waste_collector']; ?></strong></article>
             <article class="directory-stat"><span>Active accounts</span><strong><?php echo (int)$directorySummary['active']; ?></strong></article>
         </div>
 
@@ -978,11 +1090,9 @@ include 'includes/sidebar.php'; ?>
         </div>
 
         <div class="action-buttons">
-            <?php if ($selected_user && $selected_user['user_type'] === 'admin'): ?>
-                <button type="button" class="btn btn-blue" onclick="openAddModal('admin')">&#10133; ADD ADMIN ACCOUNT</button>
-            <?php else: ?>
-                <button type="button" class="btn btn-green" onclick="openAddModal('staff')">&#10133; ADD STAFF ACCOUNT</button>
-            <?php endif; ?>
+            <button type="button" class="btn btn-green" onclick="openAddModal('staff')">&#10133; ADD STAFF ACCOUNT</button>
+            <button type="button" class="btn btn-green" onclick="openAddModal('waste_collector')">&#10133; ADD WASTE COLLECTOR</button>
+            <?php if ($selected_user && $selected_user['user_type'] === 'admin'): ?><button type="button" class="btn btn-blue" onclick="openAddModal('admin')">&#10133; ADD ADMIN ACCOUNT</button><?php endif; ?>
             <?php if ($selected_user): ?>
                 <button type="button" class="btn btn-blue" onclick="openModal('editModal')">&#9998; EDIT ACCOUNT</button>
                 <?php if ((int)$selected_user['id'] !== $currentAdminId): ?>
@@ -999,7 +1109,7 @@ include 'includes/sidebar.php'; ?>
             <h2>Account Directory</h2>
             <form class="directory-toolbar" method="get" action="<?php echo $userManagementRoute; ?>">
                 <div><label for="search">Search account</label><input id="search" name="search" value="<?php echo htmlspecialchars($userSearch); ?>"></div>
-                <div><label for="role">Role</label><select id="role" name="role"><option value="">All roles</option><option value="admin" <?php echo $roleFilter === 'admin' ? 'selected' : ''; ?>>Administrator</option><option value="staff" <?php echo $roleFilter === 'staff' ? 'selected' : ''; ?>>Staff</option></select></div>
+                <div><label for="role">Role</label><select id="role" name="role"><option value="">All roles</option><option value="admin" <?php echo $roleFilter === 'admin' ? 'selected' : ''; ?>>Administrator</option><option value="staff" <?php echo $roleFilter === 'staff' ? 'selected' : ''; ?>>Staff</option><option value="waste_collector" <?php echo $roleFilter === 'waste_collector' ? 'selected' : ''; ?>>Waste Collector</option></select></div>
                 <div><label for="status">Status</label><select id="status" name="status"><option value="">All statuses</option><option value="active" <?php echo $statusFilter === 'active' ? 'selected' : ''; ?>>Active</option><option value="inactive" <?php echo $statusFilter === 'inactive' ? 'selected' : ''; ?>>Inactive</option></select></div>
                 <div class="directory-filter-actions"><button type="submit" class="btn btn-green">Filter</button><a href="<?php echo $userManagementRoute; ?>" class="btn btn-gray">Clear</a></div>
             </form>
@@ -1033,14 +1143,15 @@ include 'includes/sidebar.php'; ?>
             <form method="post" action="" enctype="multipart/form-data">
                 <div class="photo-preview" id="addPhotoPreview"><span style="font-size: 40px;">&#128100;</span></div>
                 <div class="form-group"><label>Photo</label><input type="file" name="photo" accept="image/*" onchange="previewPhoto(this, 'addPhotoPreview')"></div>
-                <div class="form-group"><label for="add_user_type">User Type</label><select id="add_user_type" name="user_type" required onchange="updateAddAccountLabels()"><option value="staff" selected>Staff</option><option value="admin">Admin</option></select></div>
+                <input type="hidden" id="add_user_type" name="user_type" value="staff">
                 <div class="form-group"><label>Username</label><input type="text" name="username" required></div>
                 <div class="form-group"><label>Email</label><input type="email" name="email" required></div>
                 <div class="form-group"><label>First Name</label><input type="text" name="first_name" required></div>
                 <div class="form-group"><label>Last Name</label><input type="text" name="last_name" required></div>
                 <div class="form-group"><label>Gender</label><select name="gender"><option value="">Select Gender</option><option value="Male">Male</option><option value="Female">Female</option><option value="Other">Other</option></select></div>
                 <div class="form-group"><label>Address</label><textarea name="address" rows="3" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px;"></textarea></div>
-                <div class="form-group"><label>Password</label><input type="password" name="password" required minlength="6"></div>
+                <div class="form-group"><label for="add-password">Password</label><div style="display:flex; gap:8px;"><input id="add-password" type="password" name="password" required minlength="8" autocomplete="new-password"><button type="button" class="btn btn-gray" data-password-toggle="add-password">Show</button></div></div>
+                <div class="form-group"><label for="add-confirm-password">Confirm Password</label><div style="display:flex; gap:8px;"><input id="add-confirm-password" type="password" name="confirm_password" required minlength="8" autocomplete="new-password"><button type="button" class="btn btn-gray" data-password-toggle="add-confirm-password">Show</button></div></div>
                 <div class="modal-buttons"><button type="button" class="btn btn-gray" onclick="closeModal('addModal')">CANCEL</button><button type="submit" name="add_user" id="addAccountSubmit" class="btn btn-green">ADD STAFF ACCOUNT</button></div>
             </form>
         </div>
@@ -1061,7 +1172,11 @@ include 'includes/sidebar.php'; ?>
                 <div class="form-group"><label>Last Name</label><input type="text" name="last_name" value="<?php echo htmlspecialchars($selected_user['last_name']); ?>" required></div>
                 <div class="form-group"><label>Gender</label><select name="gender"><option value="" <?php echo empty($selected_user['gender']) ? 'selected' : ''; ?>>Select Gender</option><option value="Male" <?php echo $selected_user['gender'] == 'Male' ? 'selected' : ''; ?>>Male</option><option value="Female" <?php echo $selected_user['gender'] == 'Female' ? 'selected' : ''; ?>>Female</option><option value="Other" <?php echo $selected_user['gender'] == 'Other' ? 'selected' : ''; ?>>Other</option></select></div>
                 <div class="form-group"><label>Address</label><textarea name="address" rows="3" style="width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 5px; font-size: 14px;"><?php echo htmlspecialchars($selected_user['address'] ?? ''); ?></textarea></div>
-                <div class="form-group"><label>User Type</label><select name="user_type" required><option value="staff" <?php echo $selected_user['user_type'] == 'staff' ? 'selected' : ''; ?>>Staff</option><option value="admin" <?php echo $selected_user['user_type'] == 'admin' ? 'selected' : ''; ?>>Admin</option></select></div>
+                <?php if ($selected_user['user_type'] === 'waste_collector'): ?>
+                <input type="hidden" name="user_type" value="waste_collector">
+                <div class="form-group"><label>User Type</label><strong>Waste Collector</strong></div>
+                <div class="form-group"><label for="edit-collector-id">Linked Waste Collector</label><select id="edit-collector-id" name="collector_id" required><?php foreach ($collectorOptions as $collector): ?><option value="<?php echo (int)$collector['id']; ?>" <?php echo (int)($selected_user['collector_id'] ?? 0) === (int)$collector['id'] ? 'selected' : ''; ?>><?php echo htmlspecialchars($collector['name'] . (empty($collector['is_active']) ? ' (Inactive)' : '')); ?></option><?php endforeach; ?></select></div>
+                <?php else: ?><div class="form-group"><label>User Type</label><select name="user_type" required><option value="staff" <?php echo $selected_user['user_type'] == 'staff' ? 'selected' : ''; ?>>Staff</option><option value="admin" <?php echo $selected_user['user_type'] == 'admin' ? 'selected' : ''; ?>>Admin</option></select></div><?php endif; ?>
                 <div class="modal-buttons"><button type="button" class="btn btn-gray" onclick="closeModal('editModal')">CANCEL</button><button type="submit" name="edit_user" class="btn btn-blue">SAVE CHANGES</button></div>
             </form>
         </div>
@@ -1073,7 +1188,8 @@ include 'includes/sidebar.php'; ?>
             <h2>RESET PASSWORD</h2>
             <form method="post" action="">
                 <input type="hidden" name="user_id" value="<?php echo $selected_user['id']; ?>">
-                <div class="form-group"><label>New Password</label><input type="password" name="new_password" required minlength="6"></div>
+                <div class="form-group"><label for="reset-password">New Password</label><div style="display:flex; gap:8px;"><input id="reset-password" type="password" name="new_password" required minlength="8" autocomplete="new-password"><button type="button" class="btn btn-gray" data-password-toggle="reset-password">Show</button></div></div>
+                <div class="form-group"><label for="reset-confirm-password">Confirm Password</label><div style="display:flex; gap:8px;"><input id="reset-confirm-password" type="password" name="confirm_password" required minlength="8" autocomplete="new-password"><button type="button" class="btn btn-gray" data-password-toggle="reset-confirm-password">Show</button></div></div>
                 <div class="modal-buttons"><button type="button" class="btn btn-gray" onclick="closeModal('resetModal')">CANCEL</button><button type="submit" name="reset_password" class="btn btn-red">RESET PASSWORD</button></div>
             </form>
         </div>
@@ -1083,13 +1199,13 @@ include 'includes/sidebar.php'; ?>
     <script>
         function updateAddAccountLabels() {
           const role = document.getElementById("add_user_type").value;
-          const roleName = role === "admin" ? "ADMIN" : "STAFF";
+          const roleName = role === "admin" ? "ADMIN" : (role === "waste_collector" ? "WASTE COLLECTOR" : "STAFF");
           document.getElementById("addAccountTitle").textContent = "ADD " + roleName + " ACCOUNT";
           document.getElementById("addAccountNotice").textContent = "Create a new " + roleName.toLowerCase() + " account.";
           document.getElementById("addAccountSubmit").textContent = "ADD " + roleName + " ACCOUNT";
         }
         function openAddModal(role) {
-          document.getElementById("add_user_type").value = role === "admin" ? "admin" : "staff";
+          document.getElementById("add_user_type").value = ["admin", "staff", "waste_collector"].includes(role) ? role : "staff";
           updateAddAccountLabels();
           openModal("addModal");
         }
@@ -1124,6 +1240,16 @@ include 'includes/sidebar.php'; ?>
           if (event.key !== "Escape") return;
           document.querySelectorAll(".modal-overlay.active").forEach((overlay) => overlay.classList.remove("active"));
         });
+        document.querySelectorAll("[data-password-toggle]").forEach((button) => {
+          button.addEventListener("click", function () {
+            const input = document.getElementById(button.dataset.passwordToggle);
+            if (!input) return;
+            input.type = input.type === "password" ? "text" : "password";
+            button.textContent = input.type === "password" ? "Show" : "Hide";
+            button.setAttribute("aria-pressed", input.type === "text" ? "true" : "false");
+          });
+        });
+        updateAddAccountLabels();
     </script>
 </body>
 </html>

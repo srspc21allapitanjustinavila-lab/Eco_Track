@@ -126,6 +126,23 @@ function weeklyWasteTrendMonthName($month)
     return DateTimeImmutable::createFromFormat('!m', (string)$month)->format('F');
 }
 
+/** A compact, readable preview with the complete values retained for the tooltip. */
+function weeklyWasteTrendSummaryList(array $labels, $visibleCount = 2)
+{
+    $labels = array_values(array_filter(array_map(static function ($label) {
+        return trim(preg_replace('/\s+/u', ' ', (string)$label));
+    }, $labels), static function ($label) {
+        return $label !== '';
+    }));
+    if (empty($labels)) {
+        return 'No street recorded';
+    }
+    $visibleCount = max(1, (int)$visibleCount);
+    $summary = implode(', ', array_slice($labels, 0, $visibleCount));
+    $remaining = count($labels) - $visibleCount;
+    return $remaining > 0 ? $summary . ' +' . $remaining . ' more' : $summary;
+}
+
 function weeklyWasteTrendRecordsForPeriod($records, $year, $month)
 {
     $periodRecords = [];
@@ -393,15 +410,25 @@ function buildWeeklyWasteTrendAnalysis($records, $filters)
 
     foreach ($buckets as &$bucket) {
         $phaseNames = [];
+        $streetNames = [];
         foreach ($bucket['records'] as $record) {
             $phaseName = trim(normalizeWastePhaseLabel($record));
             if ($phaseName !== '') {
                 $phaseNames[$phaseName] = true;
             }
+            $streetName = trim(preg_replace('/\s+/u', ' ', (string)($record['street'] ?? '')));
+            if ($streetName !== '') {
+                $streetNames[$streetName] = true;
+            }
         }
         $phaseNames = array_keys($phaseNames);
+        $streetNames = array_keys($streetNames);
         natcasesort($phaseNames);
+        natcasesort($streetNames);
+        $streetNames = array_values($streetNames);
         $bucket['phase_label'] = !empty($phaseNames) ? implode(', ', $phaseNames) : 'No collection';
+        $bucket['street_names'] = $streetNames;
+        $bucket['street_label'] = weeklyWasteTrendSummaryList($streetNames);
     }
     unset($bucket);
 
@@ -474,8 +501,8 @@ function renderWeeklyWasteTrend($trend, $options = [])
                     <?php endforeach; ?>
                     <label for="<?php echo htmlspecialchars($periodControlId); ?>-view" class="sr-only">Trend view</label>
                     <select id="<?php echo htmlspecialchars($periodControlId); ?>-view" name="trend_view" class="trend-view-select" onchange="this.form.requestSubmit()" title="Choose weekly or monthly trend view">
-                        <option value="month" <?php echo !$isWeekView ? 'selected' : ''; ?>>Per month</option>
-                        <option value="week" <?php echo $isWeekView ? 'selected' : ''; ?>>Per week</option>
+                        <option value="month" <?php echo !$isWeekView ? 'selected' : ''; ?>>Monthly view</option>
+                        <option value="week" <?php echo $isWeekView ? 'selected' : ''; ?>>Weekly view</option>
                     </select>
                     <label for="<?php echo htmlspecialchars($periodControlId); ?>" class="sr-only">Trend year</label>
                     <select id="<?php echo htmlspecialchars($periodControlId); ?>" name="trend_year" onchange="this.form.requestSubmit()" title="Select trend year" <?php echo empty($filters['year_options']) ? 'disabled' : ''; ?>>
@@ -491,23 +518,31 @@ function renderWeeklyWasteTrend($trend, $options = [])
         <?php if ((int)$trend['event_count'] === 0): ?>
             <div class="empty-state"><strong>No trend data</strong><span>No active waste records match the selected location and year.</span></div>
         <?php else: ?>
+            <p class="trend-chart-note">Showing <strong><?php echo htmlspecialchars($filters['location_label']); ?></strong>. Each bar lists its recorded phases and streets.</p>
             <div class="trend-chart-scroll" tabindex="0" aria-label="Scrollable <?php echo $isWeekView ? 'weekly' : 'monthly'; ?> waste comparison for <?php echo (int)$filters['year']; ?>">
-                <div class="trend-bars trend-bars-yearly" style="min-width: <?php echo max(100, count($trend['weeks']) * 70); ?>px;">
+                <div class="trend-bars trend-bars-yearly" style="--trend-columns: <?php echo max(1, count($trend['weeks'])); ?>; min-width: <?php echo max(620, count($trend['weeks']) * ($isWeekView ? 156 : 148)); ?>px;">
                 <?php foreach ($trend['weeks'] as $trendIndex => $week): ?>
                     <?php
                         $barHeight = $maxTrendWaste > 0 ? max(8, round(((float)$week['total_waste'] / $maxTrendWaste) * 180)) : 8;
                     $barColor = $chartPalette[$trendIndex % count($chartPalette)];
+                    $phaseLabel = (string)($week['phase_label'] ?? 'No collection');
+                    $streetNames = $week['street_names'] ?? [];
+                    $streetLabel = (string)($week['street_label'] ?? weeklyWasteTrendSummaryList($streetNames));
+                    $streetTooltip = !empty($streetNames) ? implode(', ', $streetNames) : 'No street recorded';
                     $tooltip = $week['label'] . ($week['range'] !== '' ? ' — ' . $week['range'] : '')
                         . ': ' . number_format((float)$week['total_waste'], 2) . ' kg'
                         . ' from ' . (int)$week['event_count'] . ' collection event' . ((int)$week['event_count'] === 1 ? '' : 's')
-                        . ' at ' . $filters['location_label'] . '.';
+                        . "\nPhases: " . $phaseLabel
+                        . "\nStreets: " . $streetTooltip;
                     ?>
-                    <div class="trend-item" title="<?php echo htmlspecialchars($tooltip); ?>">
+                    <article class="trend-item" title="<?php echo htmlspecialchars($tooltip); ?>" aria-label="<?php echo htmlspecialchars($tooltip); ?>">
                         <div class="trend-bar" style="--bar-height: <?php echo $barHeight; ?>px; --chart-color: <?php echo $barColor; ?>;"></div>
-                        <div class="trend-label"><?php echo htmlspecialchars($week['label']); ?></div>
-                        <div class="trend-phase"><?php echo htmlspecialchars($week['phase_label']); ?></div>
-                        <div class="trend-label"><?php echo htmlspecialchars($week['range']); ?></div>
-                    </div>
+                        <div class="trend-period"><?php echo htmlspecialchars($week['label']); ?></div>
+                        <div class="trend-value"><?php echo number_format((float)$week['total_waste'], 2); ?> kg</div>
+                        <div class="trend-range"><?php echo htmlspecialchars($week['range']); ?></div>
+                        <div class="trend-meta"><span>Phases</span><strong title="<?php echo htmlspecialchars($phaseLabel); ?>"><?php echo htmlspecialchars($phaseLabel); ?></strong></div>
+                        <div class="trend-meta"><span>Streets</span><strong title="<?php echo htmlspecialchars($streetTooltip); ?>"><?php echo htmlspecialchars($streetLabel); ?></strong></div>
+                    </article>
                 <?php endforeach; ?>
                 </div>
             </div>

@@ -1,7 +1,11 @@
 <?php
 require_once 'config.php';
 
-requireLogin();
+if (isset($canonicalRouteRole)) {
+    requireUserType($canonicalRouteRole);
+} else {
+    requireLogin();
+}
 
 // Get current user info
 $user_id = $_SESSION['user_id'];
@@ -214,6 +218,73 @@ $data_export_enabled = $currentSettings['data_export_enabled'];
 
 // Get current tab
 $current_tab = $_GET['tab'] ?? 'preferences';
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_database_backup'])) {
+    $current_tab = 'backups';
+}
+
+// Database backup
+$backupFiles = [];
+$backupFolder = '';
+$backupOtpRequired = false;
+$backupOtpError = '';
+$backupOtpMessage = '';
+if ($current_tab === 'backups' || isset($_POST['create_database_backup'])) {
+    if ($user_type !== 'admin') {
+        http_response_code(403);
+        exit('Administrator access required.');
+    }
+
+    require_once __DIR__ . '/includes/database_backup.php';
+    if (empty($_SESSION['database_backup_csrf'])) {
+        $_SESSION['database_backup_csrf'] = bin2hex(random_bytes(32));
+    }
+
+    $backupFolder = ecoBackupDirectory();
+    if ($_SERVER['REQUEST_METHOD'] === 'GET' && isset($_SESSION['database_backup_success'])) {
+        $message = $_SESSION['database_backup_success'];
+        unset($_SESSION['database_backup_success']);
+    }
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['create_database_backup'])) {
+        if (!hash_equals($_SESSION['database_backup_csrf'], (string)($_POST['database_backup_csrf'] ?? ''))) {
+            $error = 'Your backup form expired. Refresh the page and try again.';
+        } elseif (isset($_POST['backup_otp']) && verifyAndConsumeActionOtp($conn, getCurrentUser(), 'database_backup', (string)$_POST['backup_otp'])) {
+            try {
+                @set_time_limit(0);
+                $backupName = ecoCreateBackup();
+                logActivity('Created database backup', 'Backup', 'Success', $conn);
+                $_SESSION['database_backup_success'] = 'Database backup created successfully: ' . $backupName;
+                header('Location: ' . $settingsRoute . '?tab=backups', true, 303);
+                exit();
+            } catch (Throwable $e) {
+                $error = $e->getMessage();
+                logActivity('Created database backup', 'Backup', 'Failed', $conn);
+            }
+        } else {
+            $wasAlreadyPending = false;
+            $backupOtpRequired = ensurePendingActionOtp($conn, getCurrentUser(), 'database_backup', $wasAlreadyPending);
+            if (!$backupOtpRequired) {
+                $error = 'A verification code could not be sent to your registered email address. Check your email address and try again.';
+                logActivity('Requested database backup verification', 'Backup', 'Failed', $conn);
+            } else {
+                $backupOtpMessage = $wasAlreadyPending
+                    ? 'Enter the six-digit verification code already sent to your registered email address. The code expires in five minutes.'
+                    : 'Enter the six-digit verification code sent to your registered email address. The code expires in five minutes.';
+                if (isset($_POST['backup_otp'])) {
+                    $backupOtpError = trim((string)$_POST['backup_otp']) === '' && $wasAlreadyPending
+                        ? 'Enter your six-digit verification code.'
+                        : ($wasAlreadyPending
+                            ? 'The verification code is invalid. Enter the current code sent to your email.'
+                            : 'The verification code expired or was already used. A new code was sent to your email.');
+                    logActivity('Verified database backup code', 'Backup', 'Failed', $conn);
+                } else {
+                    logActivity('Requested database backup verification', 'Backup', 'Success', $conn);
+                }
+            }
+        }
+    }
+
+    $backupFiles = ecoBackupList($backupFolder);
+}
 
 // Activity Logs are available only to administrators.
 $activityModule = trim($_GET['activity_module'] ?? '');
@@ -920,7 +991,7 @@ include 'includes/sidebar.php'; ?>
             <div id="settingsValidationModal" class="transaction-confirmation-modal is-open" aria-hidden="false">
                 <section class="transaction-confirmation-dialog" role="alertdialog" aria-modal="true" aria-labelledby="settingsValidationTitle" aria-describedby="settingsValidationMessage">
                     <div class="transaction-confirmation-icon" aria-hidden="true">!</div>
-                    <h2 id="settingsValidationTitle">Changes not saved</h2>
+                    <h2 id="settingsValidationTitle"><?php echo $current_tab === 'backups' ? 'Backup unavailable' : 'Changes not saved'; ?></h2>
                     <p id="settingsValidationMessage"><?php echo htmlspecialchars($error); ?></p>
                     <div class="transaction-confirmation-actions"><button type="button" class="transaction-confirmation-continue" id="closeSettingsValidation" autofocus>Okay</button></div>
                 </section>
@@ -932,6 +1003,7 @@ include 'includes/sidebar.php'; ?>
             <a href="?tab=preferences" class="tab-btn <?php echo $current_tab == 'preferences' ? 'active' : ''; ?>">System Preference</a>
             <a href="?tab=security" class="tab-btn <?php echo $current_tab == 'security' ? 'active' : ''; ?>">Security</a>
             <a href="?tab=privacy" class="tab-btn <?php echo $current_tab == 'privacy' ? 'active' : ''; ?>">Data Privacy</a>
+            <?php if ($user_type === 'admin'): ?><a href="?tab=backups" class="tab-btn <?php echo $current_tab == 'backups' ? 'active' : ''; ?>">Database Backup</a><?php endif; ?>
             <?php if ($user_type === 'admin'): ?><a href="?tab=activity_logs" class="tab-btn <?php echo $current_tab == 'activity_logs' ? 'active' : ''; ?>">Activity Logs</a><?php endif; ?>
         </div>
 
@@ -1047,6 +1119,47 @@ include 'includes/sidebar.php'; ?>
             </form>
         </div>
 
+        <?php if ($user_type === 'admin' && $current_tab === 'backups'): ?>
+        <div class="tab-content active" id="backups">
+            <div class="section-title">DATABASE BACKUP</div>
+            <div class="section-desc">CREATE A COPY OF THE DATABASE AND REVIEW RECENT BACKUPS.</div>
+            <div class="settings-card">
+                <h3>BACK UP DATABASE</h3>
+                <p>Backups are saved on this computer outside the website folder. MySQL must be running in XAMPP.</p>
+                <p>Backup folder: <strong><?php echo htmlspecialchars($backupFolder); ?></strong></p>
+                <p>Scheduled backups require Windows Task Scheduler. Keep a separate copy of important backups in a protected location.</p>
+                <form method="post" action="?tab=backups" data-confirm-title="Confirm database backup" data-confirm-message="Create a backup of the database? Verification with a code sent to your registered email address is required." data-confirm-action="Continue to verification">
+                    <input type="hidden" name="database_backup_csrf" value="<?php echo htmlspecialchars($_SESSION['database_backup_csrf']); ?>">
+                    <button type="submit" name="create_database_backup" value="1" class="btn btn-green">CREATE BACKUP NOW</button>
+                </form>
+            </div>
+
+            <div class="settings-card">
+                <h3>RECENT BACKUPS</h3>
+                <?php if (!$backupFiles): ?>
+                    <p>No completed backups found.</p>
+                <?php else: ?>
+                    <div class="activity-table-wrap">
+                        <table class="activity-table">
+                            <thead>
+                                <tr><th>File</th><th>Created</th><th>Size</th></tr>
+                            </thead>
+                            <tbody>
+                                <?php foreach (array_slice($backupFiles, 0, 10) as $backup): ?>
+                                    <tr>
+                                        <td><?php echo htmlspecialchars($backup['name']); ?></td>
+                                        <td><?php echo htmlspecialchars(date('M j, Y g:i A', $backup['time'])); ?></td>
+                                        <td><?php echo htmlspecialchars(number_format($backup['size'] / 1024, 1)); ?> KB</td>
+                                    </tr>
+                                <?php endforeach; ?>
+                            </tbody>
+                        </table>
+                    </div>
+                <?php endif; ?>
+            </div>
+        </div>
+        <?php endif; ?>
+
         <?php if ($user_type === 'admin'): ?><div class="tab-content <?php echo $current_tab == 'activity_logs' ? 'active' : ''; ?>" id="activity_logs">
             <div class="section-title">ACTIVITY LOGS</div>
             <div class="section-desc">REVIEW ADMIN AND STAFF ACTIVITY. LOG ENTRIES ARE READ-ONLY.</div>
@@ -1079,6 +1192,25 @@ include 'includes/sidebar.php'; ?>
         </div>
         <?php endif; ?>
     </div>
+
+    <?php if ($backupOtpRequired): ?>
+        <?php
+        $otpModalId = 'backupOtpModal';
+        $otpModalTitle = 'Verify your database backup';
+        $otpModalMessage = $backupOtpMessage;
+        $otpModalError = $backupOtpError;
+        $otpModalAction = $settingsRoute . '?tab=backups';
+        $otpModalField = 'backup_otp';
+        $otpModalSubmitLabel = 'Verify and create backup';
+        $otpModalCancelHref = $settingsRoute . '?tab=backups';
+        $otpModalCancelLabel = 'Cancel backup';
+        $otpModalHiddenInputs = [
+            'create_database_backup' => '1',
+            'database_backup_csrf' => $_SESSION['database_backup_csrf'],
+        ];
+        include 'includes/otp_modal.php';
+        ?>
+    <?php endif; ?>
 
     <script>
         // Check for saved theme preference on page load

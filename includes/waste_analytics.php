@@ -124,13 +124,13 @@ function normalizeWastePhaseLabel($record)
     // Preserve non-phase groups such as Establishments before legacy fallbacks.
     $collectionGroup = trim((string)($record['collection_group'] ?? ''));
     if ($collectionGroup !== '') {
-        return $collectionGroup;
+        return wasteAnalyticsCollectionGroupFromLegacyLabel($collectionGroup);
     }
 
     $source = wasteRecordPhaseSource($record);
-    if (preg_match('/\bphase\s*([0-9]+(?:\s*-?\s*[a-z](?![a-z]))?)/i', $source, $matches)) {
-        $phaseToken = strtoupper(preg_replace('/\s+/', '', trim($matches[1])));
-        return 'Phase ' . $phaseToken;
+    $phase = wasteAnalyticsPhaseGroupFromLabel($source);
+    if ($phase !== '') {
+        return $phase;
     }
 
     $street = trim((string)($record['street'] ?? ''));
@@ -611,42 +611,41 @@ function getWasteCollectionYears($conn)
 }
 
 /**
- * Return only calendar years represented by active imported waste data.
- * Daily allocation years are included for reporting periods spanning years.
+ * Return calendar periods represented by active uploaded data, including
+ * daily allocations from reporting ranges spanning months or years.
  */
-function getImportedWasteCalendarYears($conn)
+function getImportedWasteCalendarPeriods($conn)
 {
     if (!$conn) {
-        return [];
+        return buildActiveWasteCollectionPeriodOptions([]);
     }
 
     ensureWasteAnalyticsColumns($conn);
     ensureWasteDailyAllocationTable($conn);
     try {
-        $stmt = $conn->query("SELECT DISTINCT collection_year FROM (
-            SELECT YEAR(collection_date) AS collection_year
+        $stmt = $conn->query("SELECT DISTINCT collection_period FROM (
+            SELECT DATE_FORMAT(collection_date, '%Y-%m') AS collection_period
             FROM waste_records
             WHERE is_active = 1 AND collection_date IS NOT NULL
             UNION
-            SELECT YEAR(da.allocation_date) AS collection_year
+            SELECT DATE_FORMAT(da.allocation_date, '%Y-%m') AS collection_period
             FROM waste_daily_allocations da
             INNER JOIN waste_records wr ON wr.id = da.waste_record_id
             WHERE wr.is_active = 1 AND da.allocation_date IS NOT NULL
-        ) imported_years
-        WHERE collection_year IS NOT NULL
-        ORDER BY collection_year DESC");
-        $years = [];
-        foreach ($stmt->fetchAll(PDO::FETCH_COLUMN) as $year) {
-            $year = normalizeWasteCollectionYear($year);
-            if ($year !== '') {
-                $years[] = (int)$year;
-            }
-        }
-        return $years;
+        ) imported_periods
+        WHERE collection_period IS NOT NULL
+        ORDER BY collection_period DESC");
+        return buildActiveWasteCollectionPeriodOptions($stmt->fetchAll(PDO::FETCH_COLUMN));
     } catch (PDOException $e) {
-        error_log('Failed to load imported waste calendar years: ' . $e->getMessage());
-        return [];
+        error_log('Failed to load imported waste calendar periods: ' . $e->getMessage());
+        return buildActiveWasteCollectionPeriodOptions([]);
     }
+}
+
+/** Return only years represented by active uploaded collection periods. */
+function getImportedWasteCalendarYears($conn)
+{
+    return array_map('intval', getImportedWasteCalendarPeriods($conn)['years']);
 }
 
 /** Return imported calendar years as HTML-safe string options, newest first. */
@@ -682,7 +681,7 @@ function buildActiveWasteCollectionGroups(array $records)
 {
     $groups = [];
     foreach ($records as $record) {
-        $group = trim((string)($record['collection_group'] ?? ''));
+        $group = wasteAnalyticsCollectionGroupFromLegacyLabel($record['collection_group'] ?? '');
         if ($group === '') {
             foreach (['phase_number', 'phase_date_label', 'date'] as $column) {
                 $group = wasteAnalyticsCollectionGroupFromLegacyLabel($record[$column] ?? '');
@@ -714,6 +713,11 @@ function wasteAnalyticsCollectionGroupFromLegacyLabel($sourceLabel)
         return '';
     }
 
+    $phase = wasteAnalyticsPhaseGroupFromLabel($sourceLabel);
+    if ($phase !== '') {
+        return $phase;
+    }
+
     if (preg_match('/^(.*?)\s*(?:[-–—]\s*)?date\s*:\s*(.+)$/iu', $sourceLabel, $matches)) {
         return trim($matches[1], " \t\n\r\0\x0B-–—");
     }
@@ -723,6 +727,18 @@ function wasteAnalyticsCollectionGroupFromLegacyLabel($sourceLabel)
     }
 
     return $sourceLabel;
+}
+
+/** Normalize a saved or legacy Phase label without changing non-phase groups. */
+function wasteAnalyticsPhaseGroupFromLabel($sourceLabel)
+{
+    $sourceLabel = trim((string)$sourceLabel);
+    if (!preg_match('/^\s*phase\s*([0-9]+(?:\s*-?\s*[a-z](?![a-z]))?)(?=\s|\(|$)/iu', $sourceLabel, $matches)) {
+        return '';
+    }
+
+    $phaseToken = strtoupper(preg_replace('/\s+/', '', trim($matches[1])));
+    return 'Phase ' . $phaseToken;
 }
 
 /** Return Waste Type filter values only for categories with saved positive data. */
@@ -824,6 +840,460 @@ function wasteRecordUnclassifiedKg($record)
     return wasteNumericValue($record['unclassified_waste_kg'] ?? 0);
 }
 
+/** The category vocabulary, labels, and colors used throughout EcoTrack. */
+function getWasteCategoryDefinitions($includeUnclassified = true)
+{
+    $categories = [
+        'returnable' => ['label' => 'Factory Returnable', 'color' => '#2E7D32', 'unit' => 'kg'],
+        'biowaste' => ['label' => 'Bio Waste', 'color' => '#8B5A2B', 'unit' => 'kg'],
+        'residual' => ['label' => 'Residual', 'color' => '#6B7280', 'unit' => 'kg'],
+        'hazardous' => ['label' => 'Hazardous', 'color' => '#DC2626', 'unit' => 'kg'],
+    ];
+    if ($includeUnclassified) {
+        $categories['unclassified'] = ['label' => 'Unclassified', 'color' => '#64748B', 'unit' => 'kg'];
+    }
+    return $categories;
+}
+
+/**
+ * Keep the street visualization palette local to its dashboard module so the
+ * requested factory-returnable shade does not unexpectedly recolor unrelated
+ * charts that use the shared category definitions.
+ */
+function getWasteStreetCategoryDefinitions()
+{
+    $categories = getWasteCategoryDefinitions();
+    $categories['returnable']['color'] = '#228B22';
+    return $categories;
+}
+
+function wasteRecordCategoryKg($record, $category)
+{
+    switch ($category) {
+        case 'returnable': return wasteRecordReturnableKg($record);
+        case 'biowaste': return wasteRecordBiowasteKg($record);
+        case 'residual': return wasteRecordResidualKg($record);
+        case 'hazardous': return wasteRecordHazardousKg($record);
+        case 'unclassified': return wasteRecordUnclassifiedKg($record);
+        default: return 0.0;
+    }
+}
+
+/**
+ * Resolve a chartable category breakdown for one record.  Older rows can have
+ * only a legacy total, so preserve that amount as unclassified rather than
+ * showing a total bar with no visible stacked segment.
+ */
+function wasteRecordStreetCategoryBreakdown($record, array $definitions)
+{
+    $categories = array_fill_keys(array_keys($definitions), 0.0);
+    $knownTotal = 0.0;
+
+    foreach ($categories as $category => $unused) {
+        $amount = max(0.0, wasteRecordCategoryKg($record, $category));
+        $categories[$category] = $amount;
+        $knownTotal += $amount;
+    }
+
+    $effectiveTotal = max(0.0, wasteRecordEffectiveKg($record));
+    if (array_key_exists('unclassified', $categories) && $effectiveTotal > $knownTotal) {
+        $categories['unclassified'] += $effectiveTotal - $knownTotal;
+        $knownTotal = $effectiveTotal;
+    }
+
+    return [
+        'categories' => $categories,
+        // Detailed category fields are more specific than an incomplete
+        // legacy total, while still retaining a larger legacy total above.
+        'total_waste' => max($effectiveTotal, $knownTotal),
+    ];
+}
+
+function wasteStreetComparisonKey($phaseName, $street)
+{
+    return hash('sha256', strtolower(trim((string)$phaseName)) . "\x1F" . strtolower(trim((string)$street)));
+}
+
+/** Normalize the Street chart's Phase, category, and inclusive exact-date bounds. */
+function normalizeWasteStreetFilters(array $filters, array $definitions = [])
+{
+    $definitions = $definitions ?: getWasteStreetCategoryDefinitions();
+    $category = strtolower(trim((string)($filters['category'] ?? 'all')));
+    if ($category !== 'all' && !isset($definitions[$category])) {
+        $category = 'all';
+    }
+
+    $startDate = normalizeWasteDateValue($filters['start_date'] ?? '');
+    $endDate = normalizeWasteDateValue($filters['end_date'] ?? '');
+    if ($startDate !== null && $endDate === null) {
+        $endDate = $startDate;
+    } elseif ($endDate !== null && $startDate === null) {
+        $startDate = $endDate;
+    }
+    if ($startDate !== null && $endDate !== null && $startDate > $endDate) {
+        [$startDate, $endDate] = [$endDate, $startDate];
+    }
+
+    return [
+        'phase' => trim((string)($filters['phase'] ?? '')),
+        'category' => $category,
+        'start_date' => $startDate ?: '',
+        'end_date' => $endDate ?: '',
+    ];
+}
+
+/** Return a safe YYYY-MM month value used by the Street month controls. */
+function normalizeWasteStreetMonthValue($value)
+{
+    $value = is_string($value) ? trim($value) : '';
+    return preg_match('/^(19|20)\\d{2}-(0[1-9]|1[0-2])$/', $value) ? $value : '';
+}
+
+/**
+ * Convert one or two selected Street months into inclusive database dates.
+ * A single month deliberately covers that complete month.
+ */
+function resolveWasteStreetMonthRange($startMonth, $endMonth)
+{
+    $startMonth = normalizeWasteStreetMonthValue($startMonth);
+    $endMonth = normalizeWasteStreetMonthValue($endMonth);
+    if ($startMonth !== '' && $endMonth === '') {
+        $endMonth = $startMonth;
+    } elseif ($endMonth !== '' && $startMonth === '') {
+        $startMonth = $endMonth;
+    }
+    if ($startMonth !== '' && $endMonth !== '' && $startMonth > $endMonth) {
+        [$startMonth, $endMonth] = [$endMonth, $startMonth];
+    }
+    if ($startMonth === '') {
+        return ['start_month' => '', 'end_month' => '', 'start_date' => '', 'end_date' => ''];
+    }
+
+    $startDate = $startMonth . '-01';
+    $endDate = (new DateTimeImmutable($endMonth . '-01'))->modify('last day of this month')->format('Y-m-d');
+    return [
+        'start_month' => $startMonth,
+        'end_month' => $endMonth,
+        'start_date' => $startDate,
+        'end_date' => $endDate,
+    ];
+}
+
+/**
+ * Return the valid, deduplicated source rows used by every Street-chart view.
+ * A missing is_active column denotes legacy active data; an explicit inactive
+ * value is never allowed into visualizations or their metadata.
+ */
+function buildWasteStreetSourceRows(array $records, array $definitions = [])
+{
+    $definitions = $definitions ?: getWasteStreetCategoryDefinitions();
+    $sourceRows = [];
+    $seenFingerprints = [];
+
+    foreach ($records as $record) {
+        if (array_key_exists('is_active', $record) && (int)$record['is_active'] !== 1) {
+            continue;
+        }
+        $fingerprint = trim((string)($record['record_fingerprint'] ?? ''));
+        if ($fingerprint !== '') {
+            $fingerprintKey = strtolower($fingerprint);
+            if (isset($seenFingerprints[$fingerprintKey])) {
+                continue;
+            }
+            $seenFingerprints[$fingerprintKey] = true;
+        }
+
+        $phaseName = normalizeWastePhaseLabel($record);
+        $street = trim(preg_replace('/\s+/u', ' ', (string)($record['street'] ?? '')));
+        if ($phaseName === '' || $phaseName === 'Unassigned Phase' || $street === '') {
+            continue;
+        }
+        $sourceRows[] = [
+            'key' => wasteStreetComparisonKey($phaseName, $street),
+            'phase_name' => $phaseName,
+            'street' => $street,
+            'collection_date' => wasteRecordCollectionDate($record),
+            'breakdown' => wasteRecordStreetCategoryBreakdown($record, $definitions),
+        ];
+    }
+
+    return $sourceRows;
+}
+
+/**
+ * Build Phase choices and date availability from the same active,
+ * fingerprint-safe source data as the Street chart. Availability deliberately
+ * ignores its own range so either bound can be changed without trapping users.
+ */
+function buildWasteStreetFilterState(array $records, array $filters = [])
+{
+    $definitions = getWasteStreetCategoryDefinitions();
+    $filters = normalizeWasteStreetFilters($filters, $definitions);
+    $sourceRows = buildWasteStreetSourceRows($records, $definitions);
+    $phaseMap = [];
+    $hasUnclassified = false;
+
+    foreach ($sourceRows as $sourceRow) {
+        $phaseMap[strtolower($sourceRow['phase_name'])] = $sourceRow['phase_name'];
+        if ((float)($sourceRow['breakdown']['categories']['unclassified'] ?? 0) > 0) {
+            $hasUnclassified = true;
+        }
+    }
+
+    $phaseOptions = array_values($phaseMap);
+    natcasesort($phaseOptions);
+    $phaseOptions = array_values($phaseOptions);
+    if ($filters['phase'] !== '' && !in_array($filters['phase'], $phaseOptions, true)) {
+        $filters['phase'] = '';
+    }
+    if ($filters['category'] === 'unclassified' && !$hasUnclassified) {
+        $filters['category'] = 'all';
+    }
+
+    $availableMonthsByYear = [];
+    $availableDatesByMonth = [];
+    foreach ($sourceRows as $sourceRow) {
+        if ($filters['phase'] !== '' && $sourceRow['phase_name'] !== $filters['phase']) {
+            continue;
+        }
+        $amount = $filters['category'] === 'all'
+            ? (float)$sourceRow['breakdown']['total_waste']
+            : (float)($sourceRow['breakdown']['categories'][$filters['category']] ?? 0);
+        $date = $sourceRow['collection_date'];
+        if ($amount <= 0 || $date === null) {
+            continue;
+        }
+        $availableMonthsByYear[substr($date, 0, 4)][(int)substr($date, 5, 2)] = true;
+        $availableDatesByMonth[substr($date, 0, 7)][$date] = true;
+    }
+    krsort($availableMonthsByYear, SORT_STRING);
+    $calendarYears = array_keys($availableMonthsByYear);
+    rsort($calendarYears, SORT_STRING);
+    foreach ($availableMonthsByYear as &$months) {
+        $months = array_keys($months);
+        rsort($months, SORT_NUMERIC);
+    }
+    unset($months);
+    krsort($availableDatesByMonth, SORT_STRING);
+    foreach ($availableDatesByMonth as &$dates) {
+        $dates = array_keys($dates);
+        rsort($dates, SORT_STRING);
+    }
+    unset($dates);
+
+    return [
+        'filters' => $filters,
+        'definitions' => $definitions,
+        'has_unclassified' => $hasUnclassified,
+        'phase_options' => $phaseOptions,
+        'calendar' => [
+            'years' => array_map('intval', $calendarYears),
+            'months_by_year' => $availableMonthsByYear,
+            'dates_by_month' => $availableDatesByMonth,
+        ],
+        'source_rows' => $sourceRows,
+    ];
+}
+
+/**
+ * Build the server-calculated drill-down payload for one displayed Phase +
+ * Street row. The row has already passed the same active-record, date, Phase,
+ * category, and fingerprint rules as the chart, so its values cannot drift
+ * from the corresponding stacked bar.
+ */
+function buildWasteStreetDetailPayload(array $row, array $filters, array $definitions)
+{
+    $categoryFilter = $filters['category'] ?? 'all';
+    $categoryKeys = $categoryFilter === 'all' ? array_keys($definitions) : [$categoryFilter];
+    $categoryAmounts = [];
+    $totalWaste = 0.0;
+
+    foreach ($categoryKeys as $categoryKey) {
+        if (!isset($definitions[$categoryKey])) {
+            continue;
+        }
+        $amount = max(0.0, (float)($row['categories'][$categoryKey] ?? 0));
+        // The established Unclassified category exists only to account for
+        // legacy totals. Do not introduce it to a detail view when it is not
+        // needed to reconcile the actual total.
+        if ($categoryKey === 'unclassified' && $amount <= 0) {
+            continue;
+        }
+        $categoryAmounts[$categoryKey] = $amount;
+        $totalWaste += $amount;
+    }
+
+    $categories = [];
+    foreach ($categoryAmounts as $categoryKey => $amount) {
+        $categories[$categoryKey] = [
+            'label' => $definitions[$categoryKey]['label'],
+            'color' => $definitions[$categoryKey]['color'],
+            'amount' => $amount,
+            'percent' => $totalWaste > 0 ? ($amount / $totalWaste) * 100 : 0.0,
+        ];
+    }
+
+    return [
+        'key' => $row['key'],
+        'phase_name' => $row['phase_name'],
+        'street' => $row['street'],
+        'record_count' => (int)($row['record_count'] ?? 0),
+        'first_date' => $row['first_date'] ?? null,
+        'last_date' => $row['last_date'] ?? null,
+        // Sum the displayed categories so this always reconciles with the
+        // category breakdown, including selected-category-only views.
+        'total_waste' => $totalWaste,
+        'categories' => $categories,
+    ];
+}
+
+/**
+ * Build a filterable, summed phase/street dataset. Unlike the legacy comparison
+ * this retains every Phase + Street identity and adds every matching record.
+ */
+function buildWasteStreetComparison(array $records, array $filters = [])
+{
+    $filterState = buildWasteStreetFilterState($records, $filters);
+    $definitions = $filterState['definitions'];
+    $filters = $filterState['filters'];
+    $phaseFilter = $filters['phase'];
+    $categoryFilter = $filters['category'];
+    $startDate = $filters['start_date'] ?: null;
+    $endDate = $filters['end_date'] ?: null;
+    $areas = [];
+
+    foreach ($filterState['source_rows'] as $sourceRow) {
+        $phaseName = $sourceRow['phase_name'];
+        $street = $sourceRow['street'];
+        $collectionDate = $sourceRow['collection_date'];
+        if ($phaseFilter !== '' && $phaseName !== $phaseFilter) {
+            continue;
+        }
+        if (($startDate !== null && ($collectionDate === null || $collectionDate < $startDate)) || ($endDate !== null && ($collectionDate === null || $collectionDate > $endDate))) {
+            continue;
+        }
+        $key = $sourceRow['key'];
+        if (!isset($areas[$key])) {
+            $areas[$key] = [
+                'key' => $key,
+                'phase_name' => $phaseName,
+                'street' => $street,
+                'record_count' => 0,
+                'first_date' => $collectionDate,
+                'last_date' => $collectionDate,
+                'categories' => array_fill_keys(array_keys($definitions), 0.0),
+                'total_waste' => 0.0,
+            ];
+        }
+        $areas[$key]['record_count']++;
+        if ($collectionDate !== null && ($areas[$key]['first_date'] === null || $collectionDate < $areas[$key]['first_date'])) {
+            $areas[$key]['first_date'] = $collectionDate;
+        }
+        if ($collectionDate !== null && ($areas[$key]['last_date'] === null || $collectionDate > $areas[$key]['last_date'])) {
+            $areas[$key]['last_date'] = $collectionDate;
+        }
+        $breakdown = $sourceRow['breakdown'];
+        foreach ($definitions as $category => $definition) {
+            $areas[$key]['categories'][$category] += $breakdown['categories'][$category] ?? 0.0;
+        }
+        $areas[$key]['total_waste'] += $categoryFilter === 'all'
+            ? $breakdown['total_waste']
+            : ($breakdown['categories'][$categoryFilter] ?? 0.0);
+    }
+
+    // Zero-value records never create chart rows, rankings, cards, or calendar
+    // availability.
+    $matchingAreas = array_values(array_filter($areas, static function ($row) {
+        return (float)($row['total_waste'] ?? 0) > 0;
+    }));
+
+    $scopeRows = $matchingAreas;
+    usort($scopeRows, static function ($left, $right) {
+        $comparison = (float)$right['total_waste'] <=> (float)$left['total_waste'];
+        return $comparison !== 0 ? $comparison : strcasecmp($left['phase_name'] . ' ' . $left['street'], $right['phase_name'] . ' ' . $right['street']);
+    });
+    $rows = array_slice($scopeRows, 0, 8);
+
+    $categoryTotals = array_fill_keys(array_keys($definitions), 0.0);
+    $phaseTotals = [];
+    $scopeTotal = 0.0;
+    foreach ($scopeRows as $row) {
+        $scopeTotal += (float)$row['total_waste'];
+        foreach ($categoryTotals as $category => $unused) {
+            if ($categoryFilter === 'all' || $category === $categoryFilter) {
+                $categoryTotals[$category] += (float)($row['categories'][$category] ?? 0);
+            }
+        }
+        $phaseKey = strtolower($row['phase_name']);
+        if (!isset($phaseTotals[$phaseKey])) {
+            $phaseTotals[$phaseKey] = [
+                'phase_name' => $row['phase_name'],
+                'total_waste' => 0.0,
+                'street_count' => 0,
+            ];
+        }
+        $phaseTotals[$phaseKey]['total_waste'] += (float)$row['total_waste'];
+        $phaseTotals[$phaseKey]['street_count']++;
+    }
+    $phaseTotals = array_values($phaseTotals);
+    usort($phaseTotals, static function ($left, $right) {
+        $comparison = (float)$right['total_waste'] <=> (float)$left['total_waste'];
+        return $comparison !== 0 ? $comparison : strcasecmp($left['phase_name'], $right['phase_name']);
+    });
+
+    $dominantKey = '';
+    $dominantAmount = 0.0;
+    foreach ($categoryTotals as $category => $amount) {
+        if ($amount > $dominantAmount) {
+            $dominantKey = $category;
+            $dominantAmount = $amount;
+        }
+    }
+    $lowest = !empty($scopeRows) ? $scopeRows[count($scopeRows) - 1] : null;
+    $displayedTotal = array_reduce($rows, static function ($total, $row) {
+        return $total + (float)($row['total_waste'] ?? 0);
+    }, 0.0);
+    $details = [];
+    foreach ($rows as $row) {
+        // Only the actual Top 8 chart rows receive a client payload. The hash
+        // key includes both Phase and Street, preventing same-named streets
+        // from resolving to each other.
+        $details[$row['key']] = buildWasteStreetDetailPayload($row, $filters, $definitions);
+    }
+
+    return [
+        'rows' => $rows,
+        'details' => $details,
+        'definitions' => $definitions,
+        'filter_state' => $filterState,
+        'summary' => [
+            'total_waste' => $scopeTotal,
+            'street_count' => count($scopeRows),
+            'highest' => $scopeRows[0] ?? null,
+            'lowest' => $lowest,
+            'category_totals' => $categoryTotals,
+            'dominant_category' => $dominantKey !== '' ? [
+                'key' => $dominantKey,
+                'label' => $definitions[$dominantKey]['label'],
+                'total_waste' => $dominantAmount,
+                'percent' => $scopeTotal > 0 ? ($dominantAmount / $scopeTotal) * 100 : 0.0,
+            ] : null,
+            'phase_totals' => $phaseTotals,
+            'displayed_street_count' => count($rows),
+            'displayed_total' => $displayedTotal,
+            'top_street_share' => $scopeTotal > 0 && !empty($scopeRows)
+                ? ((float)$scopeRows[0]['total_waste'] / $scopeTotal) * 100
+                : 0.0,
+        ],
+        'filters' => [
+            'phase' => $phaseFilter,
+            'category' => $categoryFilter,
+            'start_date' => $startDate ?: '',
+            'end_date' => $endDate ?: '',
+        ],
+    ];
+}
+
 function wasteRecordCollectorName($record)
 {
     foreach (['name_of_bioman', 'garbage_collector'] as $column) {
@@ -872,25 +1342,6 @@ function buildWasteCategorySummary($records)
 
     $summary['active_collectors'] = count($collectors);
     return $summary;
-}
-
-function buildWasteCollectorComparison($records, $limit = 5)
-{
-    $collectors = [];
-    foreach ($records as $record) {
-        $collector = wasteRecordCollectorName($record);
-        if (!isset($collectors[$collector])) {
-            $collectors[$collector] = ['garbage_collector' => $collector, 'total_waste' => 0.0];
-        }
-        $collectors[$collector]['total_waste'] += wasteRecordEffectiveKg($record);
-    }
-
-    $comparison = array_values($collectors);
-    usort($comparison, static function ($left, $right) {
-        $difference = (float)$right['total_waste'] <=> (float)$left['total_waste'];
-        return $difference !== 0 ? $difference : strcasecmp($left['garbage_collector'], $right['garbage_collector']);
-    });
-    return array_slice($comparison, 0, max(0, (int)$limit));
 }
 
 function wasteRecordCollectionDate($record)
@@ -1876,10 +2327,12 @@ function buildHeatmapPeriodAnalytics($sourceRecords, $currentAllocations, $previ
 
 function fetchHeatmapPeriodAnalytics($conn, $view, $period = '', $startDate = '', $endDate = '', $allowEmptyRequestedPeriod = false)
 {
+    $view = normalizeHeatmapPeriodView($view);
     ensureWasteAnalyticsColumns($conn);
     ensureWasteDailyAllocationTable($conn);
     $dates = $conn->query('SELECT DISTINCT da.allocation_date FROM waste_daily_allocations da INNER JOIN waste_records wr ON wr.id = da.waste_record_id WHERE wr.is_active = 1 ORDER BY da.allocation_date')->fetchAll(PDO::FETCH_COLUMN);
-    $selection = resolveHeatmapDateRangeSelection($startDate, $endDate) ?: resolveHeatmapPeriodSelection($dates, $view, $period, $allowEmptyRequestedPeriod);
+    $dateRange = $view === 'week' ? resolveHeatmapDateRangeSelection($startDate, $endDate) : null;
+    $selection = $dateRange ?: resolveHeatmapPeriodSelection($dates, $view, $period, $allowEmptyRequestedPeriod || $view === 'year');
     $sourceRecords = $conn->query("SELECT * FROM waste_records WHERE is_active = 1 AND street IS NOT NULL AND TRIM(street) <> ''")->fetchAll();
     $currentStmt = $conn->prepare('SELECT wr.*, da.waste_record_id, da.allocation_date, da.kilogram_of_waste FROM waste_daily_allocations da INNER JOIN waste_records wr ON wr.id = da.waste_record_id WHERE wr.is_active = 1 AND da.allocation_date BETWEEN ? AND ?');
     $currentStmt->execute([$selection['start'], $selection['end']]);

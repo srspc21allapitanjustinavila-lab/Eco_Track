@@ -1,5 +1,6 @@
 <?php
 require_once 'config.php';
+require_once 'includes/waste_analytics.php';
 requireUserType('staff');
 
 // Check session timeout
@@ -25,6 +26,7 @@ $staffWasteOverview = [
     'active_collectors' => 0,
 ];
 $staffDiversionRate = 0;
+$staffCategoryDefinitions = getWasteCategoryDefinitions(false);
 try {
     ensureWasteFormatColumns($conn);
     $newTotalExpr = "COALESCE(tuesday_factory_returnable_kg, 0) + COALESCE(wednesday_biowaste_kg, 0) + COALESCE(thursday_factory_returnable_kg, 0) + COALESCE(friday_biowaste_kg, 0) + COALESCE(saturday_hazard_waste_kg, 0) + COALESCE(residual_waste_kg, 0) + COALESCE(unclassified_waste_kg, 0)";
@@ -557,10 +559,7 @@ include 'includes/sidebar.php'; ?>
             </div>
             <?php $staffCategoryTotal = max(1, (float)$staffWasteOverview['returnable'] + (float)$staffWasteOverview['biowaste'] + (float)$staffWasteOverview['residual'] + (float)$staffWasteOverview['hazardous']); ?>
             <div class="staff-category-list">
-                <div class="staff-category-item"><div class="staff-category-name"><span>Factory Returnable</span><strong><?php echo number_format((float)$staffWasteOverview['returnable'], 2); ?> kg</strong></div><div class="staff-category-bar" style="--category-color:#2E7D32; --category-width:<?php echo ((float)$staffWasteOverview['returnable'] / $staffCategoryTotal) * 100; ?>%"><span></span></div></div>
-                <div class="staff-category-item"><div class="staff-category-name"><span>Biowaste</span><strong><?php echo number_format((float)$staffWasteOverview['biowaste'], 2); ?> kg</strong></div><div class="staff-category-bar" style="--category-color:#8B5A2B; --category-width:<?php echo ((float)$staffWasteOverview['biowaste'] / $staffCategoryTotal) * 100; ?>%"><span></span></div></div>
-                <div class="staff-category-item"><div class="staff-category-name"><span>Residual</span><strong><?php echo number_format((float)$staffWasteOverview['residual'], 2); ?> kg</strong></div><div class="staff-category-bar" style="--category-color:#6B7280; --category-width:<?php echo ((float)$staffWasteOverview['residual'] / $staffCategoryTotal) * 100; ?>%"><span></span></div></div>
-                <div class="staff-category-item"><div class="staff-category-name"><span>Hazardous</span><strong><?php echo number_format((float)$staffWasteOverview['hazardous'], 2); ?> kg</strong></div><div class="staff-category-bar" style="--category-color:#DC2626; --category-width:<?php echo ((float)$staffWasteOverview['hazardous'] / $staffCategoryTotal) * 100; ?>%"><span></span></div></div>
+                <?php foreach ($staffCategoryDefinitions as $categoryKey => $definition): ?><div class="staff-category-item"><div class="staff-category-name"><span><?php echo htmlspecialchars($definition['label']); ?></span><strong><?php echo number_format((float)$staffWasteOverview[$categoryKey], 2); ?> kg</strong></div><div class="staff-category-bar" style="--category-color:<?php echo htmlspecialchars($definition['color']); ?>; --category-width:<?php echo ((float)$staffWasteOverview[$categoryKey] / $staffCategoryTotal) * 100; ?>%"><span></span></div></div><?php endforeach; ?>
                 <div class="staff-category-item"><div class="staff-category-name"><span>Unclassified <small>(excluded from diversion)</small></span><strong><?php echo number_format((float)($staffWasteOverview['unclassified'] ?? 0), 2); ?> kg</strong></div></div>
             </div>
         </section>

@@ -4,7 +4,7 @@ requireLogin();
 
 // Redirect legacy route bookmarks to active task and dashboard pages.
 $legacyRouteUser = getCurrentUser();
-header('Location: ' . (($legacyRouteUser['user_type'] ?? '') === 'staff' ? 'staff_daily_tasks.php' : 'admin_dashboard.php'));
+header('Location: ' . userLandingRoute($legacyRouteUser['user_type'] ?? ''));
 exit();
 
 // Check session timeout

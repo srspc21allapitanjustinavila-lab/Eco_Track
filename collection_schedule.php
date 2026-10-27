@@ -35,6 +35,7 @@ $dssSelection = resolveDssWeekDateRangeSelection($dssStartDate, $dssEndDate)
 $dssLegend = buildDssWasteLegend($dssSelection);
 $dssSummary = ['total_waste' => 0.0, 'record_count' => 0];
 $dssCalendarYears = [];
+$dssCalendarMonths = [];
 
 try {
     $groups = getActiveWasteCollectionGroups($conn);
@@ -55,13 +56,16 @@ try {
     $dssLegend = $analytics['legend'];
     $dssSummary = $analytics['summary'];
     $recommendations = buildDssRecommendations($analytics['phase_totals'], [], 3);
-    $dssCalendarYears = getImportedWasteCalendarYears($conn);
+    $dssCalendarPeriods = getImportedWasteCalendarPeriods($conn);
+    $dssCalendarYears = $dssCalendarPeriods['years'];
+    $dssCalendarMonths = $dssCalendarPeriods['months_by_year'];
 } catch (PDOException $e) {
     $error = 'DSS data could not load. Please check the Waste Data records and refresh.';
 }
 
 $scopeLabel = ($collectionGroup !== '' ? $collectionGroup : 'All Collection Groups') . ' / ' . $dssSelection['label'];
 $dssCalendarYearsJson = json_encode($dssCalendarYears, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+$dssCalendarMonthsJson = json_encode($dssCalendarMonths, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -106,12 +110,12 @@ $dssCalendarYearsJson = json_encode($dssCalendarYears, JSON_HEX_TAG | JSON_HEX_A
                 <input type="hidden" name="view" value="<?php echo $dssMode === 'daily' ? 'week' : $dssMode; ?>">
                 <div class="dss-mode-panel" data-dss-mode-panel="daily" <?php echo $dssMode === 'daily' ? '' : 'hidden'; ?>>
                     <div class="dss-date-fields">
-                        <div class="dss-date-field"><label for="dssStartDate">Start date</label><input id="dssStartDate" type="date" name="start_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssSelection['start']); ?>" <?php echo $dssMode === 'daily' ? 'required' : 'disabled'; ?>></div>
-                        <div class="dss-date-field"><label for="dssEndDate">End date</label><input id="dssEndDate" type="date" name="end_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssSelection['end']); ?>" <?php echo $dssMode === 'daily' ? 'required' : 'disabled'; ?>></div>
+                        <div class="dss-date-field"><label for="dssStartDate">Start date</label><input id="dssStartDate" type="date" name="start_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($dssCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssSelection['start']); ?>" <?php echo $dssMode === 'daily' ? 'required' : 'disabled'; ?>></div>
+                        <div class="dss-date-field"><label for="dssEndDate">End date</label><input id="dssEndDate" type="date" name="end_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($dssCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssSelection['end']); ?>" <?php echo $dssMode === 'daily' ? 'required' : 'disabled'; ?>></div>
                     </div>
                 </div>
                 <div class="dss-mode-panel" data-dss-mode-panel="month" <?php echo $dssMode === 'month' ? '' : 'hidden'; ?>>
-                    <div class="dss-date-field"><label for="dssMonth">Month</label><input id="dssMonth" type="month" name="period" data-year-navigable-picker="month" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssMode === 'month' ? $dssSelection['period'] : substr($dssSelection['start'], 0, 7)); ?>" <?php echo $dssMode === 'month' ? 'required' : 'disabled'; ?>></div>
+                    <div class="dss-date-field"><label for="dssMonth">Month</label><input id="dssMonth" type="month" name="period" data-year-navigable-picker="month" data-calendar-years='<?php echo htmlspecialchars($dssCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($dssCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($dssMode === 'month' ? $dssSelection['period'] : substr($dssSelection['start'], 0, 7)); ?>" <?php echo $dssMode === 'month' ? 'required' : 'disabled'; ?>></div>
                 </div>
                 <div class="dss-mode-panel" data-dss-mode-panel="year" <?php echo $dssMode === 'year' ? '' : 'hidden'; ?>>
                     <div class="dss-date-field"><label for="dssYear">Year</label><select id="dssYear" name="period" <?php echo $dssMode === 'year' && !empty($dssCalendarYears) ? 'required' : 'disabled'; ?>>

@@ -50,6 +50,31 @@ window.addEventListener("load", function () {
       !monthPanel.hidden && monthInput.disabled === false && dailyPanel.hidden,
       "Monthly DSS mode exposes only its month field",
     );
+    monthPanel.querySelector(".year-picker-trigger").click();
+    var popover = document.querySelector(".year-picker-popover:not([hidden])");
+    function enabledMonths() {
+      return Array.from(popover.querySelectorAll(".year-picker-grid button:not(:disabled)")).map(function (button) { return button.textContent; }).join(",");
+    }
+    assert(enabledMonths() === "Dec", "Monthly DSS enables only uploaded months for the selected year");
+    var calendarYear = popover.querySelector(".year-picker-year");
+    calendarYear.value = "2025";
+    calendarYear.dispatchEvent(new Event("change", { bubbles: true }));
+    assert(enabledMonths() === "Feb,Sep", "Changing the DSS year refreshes its available months");
+    popover.querySelector('button[aria-label="February"]').click();
+    assert(monthInput.value === "2025-02", "DSS submits the chosen available year and month");
+
+    var dailyMode = form.querySelector('input[name="mode"][value="daily"]');
+    dailyMode.checked = true;
+    dailyMode.dispatchEvent(new Event("change", { bubbles: true }));
+    dailyPanel.querySelector(".year-picker-trigger").click();
+    popover = document.querySelector(".year-picker-popover:not([hidden])");
+    calendarYear = popover.querySelector(".year-picker-year");
+    calendarYear.value = "2025";
+    calendarYear.dispatchEvent(new Event("change", { bubbles: true }));
+    assert(
+      Array.from(popover.querySelector(".year-picker-month").options).map(function (option) { return option.textContent; }).join(",") === "February,September",
+      "The DSS daily dropdown also restricts months to uploaded data",
+    );
 
     result("PASS: " + checks.length + " DSS filter checks\n" + checks.join("\n"));
   } catch (error) {

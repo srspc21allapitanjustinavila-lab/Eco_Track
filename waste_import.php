@@ -475,6 +475,135 @@ function parseCsvUpload($path)
     return extractUploadedSheetParts($rows);
 }
 
+/** JSON imports must be a record array or an object containing `records`. */
+function parseJsonUpload($path)
+{
+    $json = file_get_contents($path);
+    if ($json === false) {
+        throw new RuntimeException('Could not read the JSON file.');
+    }
+    try {
+        $decoded = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
+    } catch (JsonException $e) {
+        throw new RuntimeException('The JSON file is malformed and could not be read.');
+    }
+    $records = is_array($decoded) && isset($decoded['records']) && is_array($decoded['records']) ? $decoded['records'] : $decoded;
+    if (!is_array($records) || empty($records) || array_keys($records) !== range(0, count($records) - 1)) {
+        throw new RuntimeException('JSON imports must contain an array of Waste Data records, optionally under a records property.');
+    }
+    $headers = [];
+    foreach ($records as $record) {
+        if (!is_array($record)) {
+            throw new RuntimeException('Every JSON Waste Data record must be an object.');
+        }
+        foreach (array_keys($record) as $header) {
+            if (is_string($header) && $header !== '' && !in_array($header, $headers, true)) {
+                $headers[] = $header;
+            }
+        }
+    }
+    if (empty($headers)) {
+        throw new RuntimeException('The JSON file contains no recognizable record fields.');
+    }
+    $rows = [$headers];
+    foreach ($records as $record) {
+        $rows[] = array_map(static function ($header) use ($record) {
+            $value = $record[$header] ?? '';
+            return is_scalar($value) || $value === null ? (string)$value : json_encode($value, JSON_UNESCAPED_UNICODE);
+        }, $headers);
+    }
+    return extractUploadedSheetParts($rows);
+}
+
+function assertOfficeArchiveSize(ZipArchive $zip)
+{
+    $uncompressedBytes = 0;
+    for ($index = 0; $index < $zip->numFiles; $index++) {
+        $stat = $zip->statIndex($index);
+        $uncompressedBytes += (int)($stat['size'] ?? 0);
+        if ($uncompressedBytes > MAX_WASTE_IMPORT_UNCOMPRESSED_BYTES) {
+            throw new RuntimeException('This document expands beyond the 1 GB safety limit. Split it before uploading.');
+        }
+    }
+}
+
+/** DOCX support is intentionally limited to structured table documents. */
+function parseDocxUpload($path)
+{
+    if (!class_exists('ZipArchive')) {
+        throw new RuntimeException('DOCX import requires the PHP Zip extension.');
+    }
+    $zip = new ZipArchive();
+    if ($zip->open($path) !== true) {
+        throw new RuntimeException('Could not open the DOCX file. It may be encrypted or corrupted.');
+    }
+    try {
+        assertOfficeArchiveSize($zip);
+        $documentXml = $zip->getFromName('word/document.xml');
+    } finally {
+        $zip->close();
+    }
+    if ($documentXml === false) {
+        throw new RuntimeException('The DOCX file has no readable document table data.');
+    }
+    libxml_use_internal_errors(true);
+    $document = simplexml_load_string($documentXml);
+    if ($document === false) {
+        throw new RuntimeException('The DOCX document XML could not be read.');
+    }
+    $document->registerXPathNamespace('w', 'http://schemas.openxmlformats.org/wordprocessingml/2006/main');
+    $tables = $document->xpath('//w:tbl') ?: [];
+    foreach ($tables as $table) {
+        $rows = [];
+        foreach ($table->xpath('./w:tr') ?: [] as $tableRow) {
+            $cells = [];
+            foreach ($tableRow->xpath('./w:tc') ?: [] as $cell) {
+                $text = $cell->xpath('.//w:t') ?: [];
+                $cells[] = trim(implode('', array_map(static function ($node) { return (string)$node; }, $text)));
+            }
+            if (rowHasData($cells)) {
+                $rows[] = $cells;
+            }
+        }
+        if (count($rows) < 2) {
+            continue;
+        }
+        $diagnostic = getWasteWorksheetHeaderDiagnostic($rows);
+        if (!empty($diagnostic['recognized_headers'])) {
+            return extractUploadedSheetParts($rows);
+        }
+    }
+    throw new RuntimeException('No DOCX table with recognizable Waste Data headers was found. Upload a document table, CSV, or Excel file instead.');
+}
+
+/** Use PhpSpreadsheet only when a deployment has explicitly installed it. */
+function parseXlsUpload($path)
+{
+    $autoload = __DIR__ . '/vendor/autoload.php';
+    if (is_file($autoload)) {
+        require_once $autoload;
+    }
+    if (!class_exists('PhpOffice\\PhpSpreadsheet\\IOFactory')) {
+        throw new RuntimeException('Binary .xls import is unavailable on this server. Save the file as .xlsx or ask an administrator to install the server spreadsheet reader.');
+    }
+    try {
+        $reader = \PhpOffice\PhpSpreadsheet\IOFactory::createReader('Xls');
+        $reader->setReadDataOnly(true);
+        $spreadsheet = $reader->load($path);
+        foreach ($spreadsheet->getWorksheetIterator() as $sheet) {
+            $rows = $sheet->toArray('', true, true, false);
+            if (count($rows) < 2) { continue; }
+            $diagnostic = getWasteWorksheetHeaderDiagnostic($rows);
+            if (!empty($diagnostic['recognized_headers'])) {
+                return extractUploadedSheetParts($rows);
+            }
+        }
+    } catch (Throwable $e) {
+        throw new RuntimeException('The .xls file could not be read. It may be encrypted, corrupted, or not a table workbook.');
+    }
+    throw new RuntimeException('No worksheet with recognizable Waste Data headers was found in this .xls file.');
+}
+
 function excelColumnIndex($cellReference)
 {
     $letters = preg_replace('/[^A-Z]/', '', strtoupper($cellReference));
@@ -1285,21 +1414,27 @@ function detectUploadFormat($file)
 
     // Do not rely on the browser MIME type: newly downloaded files are often
     // reported as application/octet-stream until the browser finishes indexing them.
+    $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
     if (strncmp($sample, '%PDF-', 5) === 0) {
         return 'pdf';
     }
     if (strncmp($sample, "PK\x03\x04", 4) === 0) {
-        return 'xlsx';
+        return $extension === 'docx' ? 'docx' : 'xlsx';
     }
     if (strncmp($sample, "\xD0\xCF\x11\xE0", 4) === 0) {
         return 'xls';
     }
 
-    $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+    if ($extension === 'json') {
+        return 'json';
+    }
+    if (in_array($extension, ['docx', 'xls'], true)) {
+        throw new RuntimeException('The selected .' . $extension . ' file is not a readable ' . strtoupper($extension) . ' document. It may be encrypted, corrupted, or mislabeled.');
+    }
     if (in_array($extension, ['csv', 'txt'], true) || preg_match('//u', $sample)) {
         return 'csv';
     }
-    throw new RuntimeException('Unsupported file. Please choose a CSV, Excel (.xlsx or .xlsm), or text-based PDF file.');
+    throw new RuntimeException('Unsupported file. Choose CSV/TXT, Excel (.xlsx, .xlsm, or .xls), JSON, DOCX table, or a text-based PDF.');
 }
 
 function pdfTextValue($value)
@@ -1369,10 +1504,14 @@ function prepareWasteFileForImport($file)
         [$fileHeaders, $rows, $phaseDateLabel, $rowPhaseLabels, $worksheetSummary, $rowSources] = parseXlsxUpload($file['tmp_name'], $file['name'] ?? '');
     } elseif ($fileType === 'pdf') {
         [$fileHeaders, $rows, $phaseDateLabel] = parsePdfUpload($file['tmp_name']);
+    } elseif ($fileType === 'json') {
+        [$fileHeaders, $rows, $phaseDateLabel] = parseJsonUpload($file['tmp_name']);
+    } elseif ($fileType === 'docx') {
+        [$fileHeaders, $rows, $phaseDateLabel] = parseDocxUpload($file['tmp_name']);
     } elseif ($fileType === 'xls') {
-        throw new RuntimeException('Old .xls files are not supported. Please save the Excel file as .xlsx or .xlsm and upload again.');
+        [$fileHeaders, $rows, $phaseDateLabel] = parseXlsUpload($file['tmp_name']);
     } else {
-        throw new RuntimeException('Please upload a CSV, Excel .xlsx/.xlsm, or text-based PDF file.');
+        throw new RuntimeException('Please upload a supported structured Waste Data file.');
     }
 
     if (empty($fileHeaders)) {
@@ -2869,6 +3008,10 @@ $notificationItems = getNotificationItems($conn, getCurrentUser());
           margin-top: 25px;
         }
 
+        .import-action-row form {
+          margin: 0;
+        }
+
         .add-files-panel {
           max-width: 760px;
           margin: 22px auto 0;
@@ -3153,18 +3296,20 @@ include 'includes/sidebar.php'; ?>
             <?php endif; ?>
 
             <!-- The loaded rows remain available until the user imports or discards them. -->
-            <form method="post" action="" enctype="multipart/form-data" id="confirmImportForm" style="margin-top: 25px; text-align: center;" data-confirm-title="Import Waste Data?" data-confirm-message="Are you sure you want to import the <?php echo (int)$previewTotalRows; ?> validated Waste Data record(s) in this batch?" data-confirm-action="Continue to verification">
-                <input type="hidden" name="waste_import_csrf" value="<?php echo htmlspecialchars($wasteImportCsrf); ?>">
-                <button type="submit" name="confirm_import" id="confirmImportButton" class="btn btn-upload" <?php echo !empty($unresolvedImportAreas) ? 'disabled aria-disabled="true" title="Resolve unmatched areas first"' : ''; ?> style="background: #2196f3; font-size: 16px; padding: 15px 40px;">
-                    📤 UPLOAD ALL FILES
-                </button>
-                <button type="submit" name="cancel_import" class="btn btn-cancel" style="font-size: 16px; padding: 15px 32px; margin-left: 10px;">
-                    Cancel
-                </button>
-                <p style="color: var(--text-muted); margin-top: 10px; font-size: 13px;">
-                    Add more files if needed, then upload all previewed and added files together.
-                </p>
-            </form>
+            <div class="preview-actions import-action-row">
+                <form method="post" action="" enctype="multipart/form-data" id="confirmImportForm" data-confirm-title="Load Waste Data?" data-confirm-message="Are you sure you want to load this data?" data-confirm-action="Yes, Load Data">
+                    <input type="hidden" name="waste_import_csrf" value="<?php echo htmlspecialchars($wasteImportCsrf); ?>">
+                    <button type="submit" name="confirm_import" id="confirmImportButton" class="btn btn-upload" <?php echo !empty($unresolvedImportAreas) ? 'disabled aria-disabled="true" title="Resolve unmatched areas first"' : ''; ?> style="background: #2196f3; font-size: 16px; padding: 15px 40px;">
+                        UPLOAD ALL FILES
+                    </button>
+                </form>
+                <form method="post" action="" enctype="multipart/form-data" id="cancelImportForm" data-confirm-title="Cancel Upload?" data-confirm-message="Are you sure you want to cancel this upload?" data-confirm-action="Yes">
+                    <input type="hidden" name="waste_import_csrf" value="<?php echo htmlspecialchars($wasteImportCsrf); ?>">
+                    <button type="submit" name="cancel_import" class="btn btn-cancel" style="font-size: 16px; padding: 15px 32px;">
+                        Cancel
+                    </button>
+                </form>
+            </div>
             <form method="post" action="" enctype="multipart/form-data" id="addFilesForm" class="add-files-panel">
                 <input type="hidden" name="waste_import_csrf" value="<?php echo htmlspecialchars($wasteImportCsrf); ?>">
                 <input type="hidden" name="add_files" value="1">
@@ -3172,9 +3317,9 @@ include 'includes/sidebar.php'; ?>
                     Have more files? Add one or select multiple files; they will join this preview before anything is uploaded.
                 </div>
                 <div class="preview-actions">
-                    <input type="file" name="additional_files[]" id="additional_files" class="file-input" multiple accept=".csv,.xlsx,.xlsm,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onchange="queueAdditionalFiles(this)">
+                    <input type="file" name="additional_files[]" id="additional_files" class="file-input" multiple accept=".csv,.txt,.xlsx,.xlsm,.xls,.json,.docx,.pdf,text/csv,text/plain,application/json,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="queueAdditionalFiles(this)">
                     <label for="additional_files" class="btn btn-add-files" id="addFilesButton">
-                        + Add file(s)
+                        + Add file
                     </label>
                     <span id="additionalFilesSelected" class="preview-file-name" hidden></span>
                 </div>
@@ -3185,14 +3330,14 @@ include 'includes/sidebar.php'; ?>
         <!-- Upload Area -->
         <?php if (empty($preview_display_data) && $importResolutionDraft === null): ?>
         <div class="upload-container">
-            <form method="post" action="" enctype="multipart/form-data" id="uploadForm">
+            <form method="post" action="" enctype="multipart/form-data" id="uploadForm" data-confirm-title="Load File Data?" data-confirm-message="Do you want to load this file data for preview?" data-confirm-action="Load data">
                 <input type="hidden" name="waste_import_csrf" value="<?php echo htmlspecialchars($wasteImportCsrf); ?>">
                 <div class="upload-area" onclick="document.getElementById('csv_file').click()">
                     <div class="upload-icon">📁</div>
                     <div class="upload-text">Click to upload file</div>
-                    <div class="upload-hint">Supported formats: CSV, Excel .xlsx/.xlsm, or text-based PDF. Every worksheet in an Excel workbook is scanned; only rows with recognized Waste Data columns are imported. Extra columns, unrelated worksheets, Excel macros, and TOTAL/summary rows are ignored. The MRF 3-Day Block layout is supported, including Biosan, Street, No. of Houses, Tuesday–Thursday, and Friday–Saturday tables. PDF imports support EcoTrack table PDFs; scanned PDFs should be converted to CSV or Excel. Include a year in the filename or sheet date for historical records; a month/day-only filename uses the current year.</div>
+                    <div class="upload-hint">Supported structured formats: CSV/TXT, XLSX/XLSM, XLS when the server spreadsheet reader is installed, JSON record arrays, DOCX tables, and text-based PDF exports. EcoTrack keeps only recognized Waste Data fields; unrelated columns are ignored. Scanned, encrypted, corrupted, and unstructured documents cannot be safely imported.</div>
                     <button type="button" class="btn btn-upload" onclick="event.stopPropagation(); document.getElementById('csv_file').click();">Choose File</button>
-                    <input type="file" name="csv_file" id="csv_file" class="file-input" accept=".csv,.xlsx,.xlsm,.xls,.pdf,text/csv,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12" onchange="showFileName(this, 'selectedFile', 'fileName')">
+                    <input type="file" name="csv_file" id="csv_file" class="file-input" accept=".csv,.txt,.xlsx,.xlsm,.xls,.json,.docx,.pdf,text/csv,text/plain,application/json,application/pdf,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel.sheet.macroEnabled.12,application/vnd.openxmlformats-officedocument.wordprocessingml.document" onchange="showFileName(this, 'selectedFile', 'fileName')">
                 </div>
 
                 <div id="selectedFile" style="margin-top: 20px; text-align: center; display: none;">

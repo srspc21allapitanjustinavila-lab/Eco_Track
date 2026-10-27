@@ -33,6 +33,12 @@
     <script defer src="tests/year_picker_portal_fixture.browser.js"></script>
 </head>
 <body>
+    <div style="width: 180px; margin: 12px;">
+        <label for="fixture-standalone-month">Reporting month</label>
+        <input id="fixture-standalone-month" type="month" data-year-navigable-picker="month" data-calendar-years='[2026,2025,2024]' data-calendar-months='{"2026":[12],"2025":[2,9],"2024":[]}' value="2026-12">
+        <label for="fixture-date">Reporting date</label>
+        <input id="fixture-date" type="date" data-year-navigable-picker="date" data-year-picker-date-display="numeric" data-year-picker-allow-empty="true" data-calendar-years='[2026,2025,2024]' data-calendar-months='{"2026":[12],"2025":[2,9],"2024":[1]}' data-calendar-dates='{"2026-12":["2026-12-23"],"2025-02":["2025-02-14"],"2025-09":["2025-09-12"],"2024-01":["2024-01-15"]}' value="2026-12-23">
+    </div>
     <form id="period-filter">
         <div class="calendar-clip">
             <label for="fixture-month">Collection Period</label>

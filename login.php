@@ -78,7 +78,7 @@ if (isLoggedIn()) {
     }
     requireLogin();
     $existingUser = getCurrentUser();
-    header('Location: ' . (($existingUser['user_type'] ?? '') === 'admin' ? 'admin_dashboard.php' : 'staff_home.php'));
+    header('Location: ' . userLandingRoute($existingUser['user_type'] ?? ''));
     exit();
 }
 
@@ -121,7 +121,7 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
         $conn = getDBConnection();
         if ($conn) {
             try {
-                $stmt = $conn->prepare("SELECT * FROM users WHERE username = ? AND is_active = 1");
+                $stmt = $conn->prepare("SELECT * FROM users WHERE BINARY username = ? AND is_active = 1");
                 $stmt->execute([$username]);
                 $user = $stmt->fetch();
 
@@ -325,18 +325,61 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
           align-items: center;
           margin-top: 0.5rem;
           margin-left: 10px;
+          gap: 8px;
         }
 
         .show-checkbox {
+          appearance: none;
+          -webkit-appearance: none;
+          flex: 0 0 20px;
           width: 20px;
           height: 20px;
-          margin-right: 8px;
-          accent-color: var(--toggle-active);
+          margin: 0;
+          display: grid;
+          place-content: center;
+          border: 1.5px solid var(--eco-border, var(--input-border));
+          border-radius: 2px;
+          background: var(--input-bg);
+          box-shadow: none !important;
+          cursor: pointer;
+        }
+
+        .show-checkbox::before {
+          content: "";
+          width: 11px;
+          height: 11px;
+          clip-path: polygon(14% 44%, 0 64%, 41% 100%, 100% 16%, 80% 0%, 37% 62%);
+          background: #ffffff;
+          transform: scale(0);
+          transition: transform 0.15s ease;
+        }
+
+        .show-checkbox:checked {
+          border-color: var(--toggle-active) !important;
+          background: var(--toggle-active);
+        }
+
+        .show-checkbox:checked::before {
+          transform: scale(1);
+        }
+
+        .show-checkbox:focus {
+          outline: none;
+          border-color: var(--eco-border, var(--input-border)) !important;
+          box-shadow: none !important;
+        }
+
+        .show-checkbox:focus-visible {
+          outline: 3px solid rgba(47, 125, 79, 0.28);
+          outline-offset: 2px;
         }
 
         .show-label {
           font-size: 0.9rem;
           color: var(--text-secondary);
+          line-height: 1;
+          user-select: none;
+          cursor: pointer;
         }
 
         .login-btn {

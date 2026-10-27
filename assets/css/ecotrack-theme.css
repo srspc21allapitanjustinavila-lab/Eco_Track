@@ -910,18 +910,25 @@ table td {
 
 .trend-bars {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
-  align-items: stretch;
-  gap: 10px;
-  min-height: 260px;
+  grid-template-columns: repeat(var(--trend-columns, 1), minmax(142px, 1fr));
+  align-items: start;
+  gap: 14px;
+  min-height: 450px;
 }
 
 .trend-item {
   display: grid;
-  grid-template-rows: 180px auto auto auto;
-  align-items: end;
-  gap: 8px;
+  grid-template-rows: 180px 20px 20px 32px 66px 84px;
+  align-items: start;
+  gap: 6px;
+  height: 450px;
+  box-sizing: border-box;
   min-width: 0;
+  padding: 8px;
+  border: 1px solid var(--eco-border);
+  border-radius: 10px;
+  background: var(--eco-surface);
+  box-shadow: 0 2px 8px rgba(11, 45, 35, 0.04);
 }
 
 .trend-bar {
@@ -933,12 +940,10 @@ table td {
 }
 
 .trend-label {
-  overflow: hidden;
   color: var(--eco-text-soft);
   font-size: 11px;
   text-align: center;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .trend-phase {
@@ -950,12 +955,69 @@ table td {
   text-align: center;
 }
 
+.trend-period {
+  color: var(--eco-text);
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.trend-value {
+  color: var(--eco-primary);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
+.trend-range {
+  color: var(--eco-text-soft);
+  font-size: 11px;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.trend-meta {
+  display: grid;
+  gap: 2px;
+  min-height: 0;
+  min-width: 0;
+  padding-top: 5px;
+  border-top: 1px solid var(--eco-border);
+}
+
+.trend-meta span {
+  color: var(--eco-text-soft);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.trend-meta strong {
+  color: var(--eco-text);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+  min-height: 0;
+  overflow: auto;
+  overflow-wrap: anywhere;
+}
+
+.trend-chart-note {
+  margin: 2px 0 0;
+  color: var(--eco-text-soft);
+  font-size: 12px;
+}
+
 /* Compact view and year selectors beside trend insights. */
 .trend-period-control {
   margin: 0;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .trend-period-control select {
@@ -976,7 +1038,7 @@ table td {
 }
 
 .trend-period-control .trend-view-select {
-  max-width: 92px;
+  max-width: 128px;
 }
 
 .trend-chart-scroll {
@@ -993,7 +1055,7 @@ table td {
 }
 
 .trend-bars-yearly {
-  grid-template-columns: repeat(auto-fit, minmax(54px, 1fr));
+  grid-template-columns: repeat(var(--trend-columns, 1), minmax(142px, 1fr));
 }
 
 /* Keep the dashboard layout stable while a chart refreshes. */
@@ -1017,11 +1079,11 @@ table td {
   height: auto;
   border-radius: 50%;
   background: conic-gradient(
-    var(--eco-primary) 0 var(--returnable, 0%),
-    var(--eco-blue) var(--returnable, 0%) calc(var(--returnable, 0%) + var(--biowaste, 0%)),
-    var(--eco-amber) calc(var(--returnable, 0%) + var(--biowaste, 0%))
+    var(--category-returnable, #2E7D32) 0 var(--returnable, 0%),
+    var(--category-biowaste, #8B5A2B) var(--returnable, 0%) calc(var(--returnable, 0%) + var(--biowaste, 0%)),
+    var(--category-residual, #6B7280) calc(var(--returnable, 0%) + var(--biowaste, 0%))
       calc(var(--returnable, 0%) + var(--biowaste, 0%) + var(--residual, 0%)),
-    var(--eco-danger) calc(var(--returnable, 0%) + var(--biowaste, 0%) + var(--residual, 0%)) 100%
+    var(--category-hazardous, #DC2626) calc(var(--returnable, 0%) + var(--biowaste, 0%) + var(--residual, 0%)) 100%
   );
   display: grid;
   place-items: center;
@@ -2501,7 +2563,8 @@ select {
 .year-picker-grid button:focus-visible,
 .year-picker-nav:focus-visible,
 .year-picker-year:focus-visible,
-.year-picker-month:focus-visible {
+.year-picker-month:focus-visible,
+.year-picker-clear:focus-visible {
   outline: 2px solid var(--eco-primary);
   outline-offset: 2px;
 }
@@ -2611,6 +2674,17 @@ select {
 .year-picker-grid button:disabled {
   cursor: not-allowed;
   opacity: 0.35;
+}
+
+.year-picker-clear {
+  width: 100%;
+  min-height: 32px;
+  margin-top: 10px;
+  border: 0;
+  background: transparent;
+  color: var(--eco-primary-strong);
+  cursor: pointer;
+  font: 700 12px/1 inherit;
 }
 
 .year-picker-grid button.is-selected {

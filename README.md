@@ -53,6 +53,35 @@ EcoTrack/
 3. Import `waste_data_corrected.sql` only if you need to create an empty `waste_records` table. It is safe to import and does not delete existing records or add sample data.
 4. Open `http://localhost/EcoTrack/login.php`.
 
+### XAMPP database backups and recovery
+
+Administrators can open **System Preferences → Database Backup** to create a
+backup and see the latest completed files. MySQL must be running. By default,
+the files are stored outside the website in the `EcoTrack_Backups` folder two
+levels above this project. They contain account and waste data, so restrict
+access to that folder and keep a separate protected copy on another device.
+Backups do not include uploaded profile photos or other files.
+
+To set up automatic backups on Windows, run this once in PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\setup_xampp_backups.ps1
+```
+
+The task checks hourly while the Windows user is signed in and creates a backup
+if the latest successful backup is at least 24 hours old. If MySQL is off, the
+task will retry on its next run. Backups are not deleted automatically. To
+change the backup location, set `ECOTRACK_BACKUP_DIR` in `.env` to a directory
+outside the website; `ECOTRACK_MYSQLDUMP` can point to a different XAMPP
+`mysqldump.exe` if necessary.
+
+To check recovery without changing production data, create a new empty database
+in phpMyAdmin, select it, and import a `.sql.gz` backup. Verify the restored
+tables and records there. Restoring into the live database can replace existing
+tables and data; first make a fresh backup and only proceed when recovery is
+actually needed. The XAMPP MySQL account needs the usual dump permissions for
+tables, routines, events, and triggers.
+
 For an existing installation with waste records, run the duplicate-protection backfill once from the project directory:
 
 ```powershell

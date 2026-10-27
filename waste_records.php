@@ -1,8 +1,13 @@
 <?php
 require_once 'config.php';
 require_once 'includes/waste_analytics.php';
+require_once 'includes/spreadsheet_export.php';
 
-requireLogin();
+if (isset($canonicalRouteRole)) {
+    requireUserType($canonicalRouteRole);
+} else {
+    requireLogin();
+}
 
 // Get current user info
 $user_type = $_SESSION['user']['user_type'] ?? 'staff';
@@ -56,7 +61,8 @@ function wasteRecordCollectionGroup($record)
 {
     $collectionGroup = trim((string)($record['collection_group'] ?? ''));
     if ($collectionGroup !== '') {
-        return $collectionGroup;
+        [$group] = splitWasteCollectionGroupAndPeriod($collectionGroup);
+        return $group !== '' ? $group : $collectionGroup;
     }
 
     foreach (['phase_number', 'phase_date_label', 'date'] as $column) {
@@ -76,7 +82,7 @@ function wasteRecordDatePeriod($record)
         return $reportingPeriod;
     }
 
-    foreach (['phase_date_label', 'date', 'phase_number'] as $column) {
+    foreach (['collection_group', 'phase_date_label', 'date', 'phase_number'] as $column) {
         [, $period] = splitWasteCollectionGroupAndPeriod($record[$column] ?? '');
         if ($period !== '') {
             return $period;
@@ -448,7 +454,9 @@ if ($export_format !== '' && $export_format !== 'excel') {
             $stmt->execute($params);
             $export_records = $stmt->fetchAll();
             $filename = 'waste-data-' . date('Y-m-d-His');
-            $excel = buildWasteRecordsExcel($export_records, implode(' | ', $filterSummary));
+            $exportRows = array_map(static function ($record) {
+                return wasteRecordDisplayValues($record);
+            }, $export_records);
             logActivity('Exported waste data (EXCEL)', 'Waste Data', 'Success', $conn);
             if (ob_get_length()) {
                 ob_clean();
@@ -460,10 +468,13 @@ if ($export_format !== '' && $export_format !== 'excel') {
                 'httponly' => false,
                 'samesite' => 'Lax',
             ]);
-            header('Content-Type: application/vnd.ms-excel; charset=utf-8');
-            header('Content-Disposition: attachment; filename="' . $filename . '.xls"');
-            header('Content-Length: ' . strlen($excel));
-            echo $excel;
+            ecoTrackDownloadXlsx(
+                $filename,
+                'Waste Data Entries Export',
+                array_merge(['Collection Group', 'Date / Period'], getWasteFormatHeaders()),
+                $exportRows,
+                ['Generated' => date('Y-m-d H:i:s'), 'Filters' => implode(' | ', $filterSummary) ?: 'None']
+            );
             exit();
         } catch (Throwable $e) {
             $error = "Failed to export waste records.";

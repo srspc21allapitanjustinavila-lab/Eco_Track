@@ -34,6 +34,11 @@ if ($isHeatmapDataRequest && isSessionTimeout()) {
 // Get current user info
 // Keep saved streets and establishments separate while using approved map areas.
 $conn = getDBConnection();
+if ($isHeatmapDataRequest && !$conn) {
+    http_response_code(401);
+    echo json_encode(['error' => 'Authentication required.']);
+    exit();
+}
 if ($isHeatmapDataRequest && $conn) {
     try {
         $sessionUserId = (int)($_SESSION['user_id'] ?? 0);
@@ -55,6 +60,15 @@ if ($isHeatmapDataRequest && $conn) {
     }
 }
 $user_type = $_SESSION['user']['user_type'] ?? 'staff';
+if (isset($canonicalRouteRole) && $user_type !== $canonicalRouteRole) {
+    if ($isHeatmapDataRequest) {
+        http_response_code(403);
+        echo json_encode(['error' => 'Access denied.']);
+    } else {
+        header('Location: access_denied.php');
+    }
+    exit();
+}
 $wasteHeatmapRoute = $user_type === 'staff' ? 'staff_waste_heatmap.php' : 'admin_waste_heatmap.php';
 if (empty($canonicalRouteEntry) && $_SERVER['REQUEST_METHOD'] === 'GET') {
     $routeQuery = http_build_query($_GET);
@@ -76,6 +90,7 @@ $heatmapMode = in_array($requestedHeatmapMode, ['daily', 'month', 'year'], true)
         : (($legacyYear !== '' || $requestedHeatmapView === 'year') ? 'year' : 'daily'));
 $heatmapView = $heatmapMode === 'daily' ? 'week' : $heatmapMode;
 $heatmapPeriod = trim((string)($_GET['period'] ?? ($legacyYear !== '' ? $legacyYear : '')));
+$heatmapLocationSearch = trim((string)($_GET['search'] ?? ''));
 $heatmapStartDate = $heatmapMode === 'daily' ? (normalizeHeatmapDateInput($_GET['start_date'] ?? '') ?? '') : '';
 $heatmapEndDate = $heatmapMode === 'daily' ? (normalizeHeatmapDateInput($_GET['end_date'] ?? '') ?? '') : '';
 $heatmapSelection = $heatmapMode === 'daily'
@@ -86,10 +101,17 @@ $heatmapLegend = buildDailyWasteLegend();
 $heatmapPhaseMetrics = [];
 $heatmapSummary = ['total_waste' => 0.0, 'location_count' => 0];
 $heatmapCalendarYears = [];
+$heatmapCalendarMonths = [];
 
 try {
     if (!$conn) {
         throw new PDOException('Database connection unavailable.');
+    }
+    $heatmapCalendarPeriods = getImportedWasteCalendarPeriods($conn);
+    $heatmapCalendarYears = $heatmapCalendarPeriods['years'];
+    $heatmapCalendarMonths = $heatmapCalendarPeriods['months_by_year'];
+    if (!$isHeatmapDataRequest && $heatmapMode === 'year') {
+        $heatmapPeriod = resolveImportedWasteCollectionYear($heatmapPeriod, $heatmapCalendarYears);
     }
     $heatmapAnalytics = fetchHeatmapPeriodAnalytics($conn, $heatmapView, $heatmapPeriod, $heatmapStartDate, $heatmapEndDate, $heatmapMode === 'month');
     $heatmapLocations = $heatmapAnalytics['locations'];
@@ -97,7 +119,6 @@ try {
     $heatmapSelection = $heatmapAnalytics['selection'];
     $heatmapPhaseMetrics = $heatmapAnalytics['phase_metrics'];
     $heatmapSummary = $heatmapAnalytics['summary'];
-    $heatmapCalendarYears = getImportedWasteCalendarYears($conn);
 } catch (PDOException $e) {
     error_log('Shared heatmap analytics could not load: ' . $e->getMessage());
     if ($isHeatmapDataRequest) {
@@ -118,6 +139,7 @@ if ($isHeatmapDataRequest) {
 }
 $heatmapLocationsJson = json_encode($heatmapLocations, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 $heatmapCalendarYearsJson = json_encode($heatmapCalendarYears, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
+$heatmapCalendarMonthsJson = json_encode($heatmapCalendarMonths, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 $heatmapDataUrl = $heatmapMode === 'daily'
     ? $wasteHeatmapRoute . '?format=json&mode=daily&start_date=' . rawurlencode($heatmapSelection['start']) . '&end_date=' . rawurlencode($heatmapSelection['end'])
     : $wasteHeatmapRoute . '?format=json&mode=' . rawurlencode($heatmapMode) . '&view=' . rawurlencode($heatmapView) . '&period=' . rawurlencode($heatmapSelection['period']);
@@ -414,16 +436,32 @@ $notificationItems = getNotificationItems($conn, $user);
           font-weight: 700;
         }
         .heatmap-period-form {
-          display: grid;
-          grid-template-columns: minmax(280px, 1fr) auto;
-          gap: 12px;
-          align-items: end;
-          margin-bottom: 12px;
+          margin-bottom: 18px;
           padding: 16px 18px;
           background: var(--bg-secondary);
           border: 2px solid var(--eco-primary, #689f38);
           border-radius: 12px;
           box-shadow: var(--card-shadow);
+        }
+        .heatmap-filter-fields {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+          gap: 12px;
+          align-items: end;
+        }
+        .heatmap-period-fields {
+          min-width: 0;
+        }
+        .heatmap-search-field {
+          min-width: 0;
+        }
+        .heatmap-search-controls {
+          display: flex;
+          gap: 8px;
+        }
+        .heatmap-search-controls input {
+          min-width: 0;
+          flex: 1;
         }
         .heatmap-mode-selector {
           display: flex;
@@ -484,9 +522,10 @@ $notificationItems = getNotificationItems($conn, $user);
         }
         .heatmap-period-form input[type="date"],
         .heatmap-period-form input[type="month"],
+        .heatmap-period-form input[type="search"],
         .heatmap-period-form select {
           width: 100%;
-          min-height: 42px;
+          min-height: 46px;
           padding: 9px 11px;
           border: 1px solid var(--border-color);
           border-radius: 8px;
@@ -494,12 +533,8 @@ $notificationItems = getNotificationItems($conn, $user);
           color: var(--text-primary);
           font: inherit;
         }
-        .heatmap-month-field,
-        .heatmap-year-field {
-          max-width: 280px;
-        }
         .heatmap-period-submit {
-          min-height: 42px;
+          min-height: 46px;
           padding: 9px 16px;
           border: 0;
           border-radius: 8px;
@@ -510,39 +545,8 @@ $notificationItems = getNotificationItems($conn, $user);
           cursor: pointer;
           white-space: nowrap;
         }
-        .heatmap-toolbar {
-          display: grid;
-          grid-template-columns: minmax(220px, 1.5fr) 1fr auto;
-          gap: 12px;
-          align-items: end;
-          margin-bottom: 18px;
-          padding: 18px;
-          background: var(--bg-secondary);
-          border: 1px solid var(--border-color);
-          border-radius: 12px;
-          box-shadow: var(--card-shadow);
-        }
-        .heatmap-control label {
-          display: block;
-          margin-bottom: 6px;
-          color: var(--text-secondary);
-          font-size: 11px;
-          font-weight: 700;
-          letter-spacing: 0.04em;
-          text-transform: uppercase;
-        }
-        .heatmap-control input,
-        .heatmap-control select {
-          width: 100%;
-          min-height: 40px;
-          padding: 9px 11px;
-          border: 1px solid var(--border-color);
-          border-radius: 8px;
-          background: var(--input-bg);
-          color: var(--text-primary);
-        }
         .heatmap-reset {
-          min-height: 40px;
+          min-height: 46px;
           padding: 10px 15px;
           border: 1px solid var(--border-color);
           border-radius: 8px;
@@ -580,7 +584,6 @@ $notificationItems = getNotificationItems($conn, $user);
           margin-bottom: 8px;
           text-align: left;
           border: 1px solid var(--border-color);
-          border-left: 4px solid var(--marker-color);
           border-radius: 8px;
           background: var(--bg-secondary);
           color: var(--text-primary);
@@ -638,19 +641,21 @@ $notificationItems = getNotificationItems($conn, $user);
           .heatmap-summary {
             grid-template-columns: 1fr 1fr;
           }
-          .heatmap-period-form,
-          .heatmap-toolbar {
+          .heatmap-filter-fields {
             grid-template-columns: 1fr 1fr;
           }
-          .heatmap-reset {
-            width: 100%;
+          .heatmap-period-submit {
+            grid-column: 1 / -1;
+            justify-self: end;
           }
         }
         @media (max-width: 620px) {
           .heatmap-summary,
-          .heatmap-period-form,
-          .heatmap-toolbar {
+          .heatmap-filter-fields {
             grid-template-columns: 1fr;
+          }
+          .heatmap-period-submit {
+            width: 100%;
           }
           .map-container {
             padding: 15px;
@@ -688,23 +693,24 @@ include 'includes/sidebar.php'; ?>
             <div class="heatmap-stat"><span class="heatmap-stat-label">Highest location</span><span id="highestLocation" class="heatmap-stat-value">No data</span></div>
         </section>
 
-        <form class="heatmap-period-form" method="get" action="<?php echo $wasteHeatmapRoute; ?>" aria-label="Waste heatmap period filter">
-            <div>
+        <form id="heatmapPeriodFilter" class="heatmap-period-form" method="get" action="<?php echo $wasteHeatmapRoute; ?>" aria-label="Waste heatmap period filter">
                 <div class="heatmap-mode-selector" role="radiogroup" aria-label="Heatmap view">
                     <label class="heatmap-mode-option"><input type="radio" name="mode" value="daily" <?php echo $heatmapMode === 'daily' ? 'checked' : ''; ?>> Daily date range</label>
                     <label class="heatmap-mode-option"><input type="radio" name="mode" value="month" <?php echo $heatmapMode === 'month' ? 'checked' : ''; ?>> Monthly view</label>
                     <label class="heatmap-mode-option"><input type="radio" name="mode" value="year" <?php echo $heatmapMode === 'year' ? 'checked' : ''; ?>> Yearly view</label>
                 </div>
                 <input type="hidden" name="view" value="<?php echo $heatmapMode === 'daily' ? 'week' : $heatmapMode; ?>">
+            <div class="heatmap-filter-fields">
+              <div class="heatmap-period-fields">
                 <div class="heatmap-mode-panel" data-heatmap-mode-panel="daily" <?php echo $heatmapMode === 'daily' ? '' : 'hidden'; ?>>
                     <span class="heatmap-period-label">Daily waste date range</span>
                     <div class="heatmap-date-fields">
-                        <div class="heatmap-date-field"><label for="heatmapStartDate">Start date</label><input id="heatmapStartDate" type="date" name="start_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapSelection['start']); ?>" <?php echo $heatmapMode === 'daily' ? 'required' : 'disabled'; ?>></div>
-                        <div class="heatmap-date-field"><label for="heatmapEndDate">End date</label><input id="heatmapEndDate" type="date" name="end_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapSelection['end']); ?>" <?php echo $heatmapMode === 'daily' ? 'required' : 'disabled'; ?>></div>
+                        <div class="heatmap-date-field"><label for="heatmapStartDate">Start date</label><input id="heatmapStartDate" type="date" name="start_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($heatmapCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapSelection['start']); ?>" <?php echo $heatmapMode === 'daily' ? 'required' : 'disabled'; ?>></div>
+                        <div class="heatmap-date-field"><label for="heatmapEndDate">End date</label><input id="heatmapEndDate" type="date" name="end_date" data-year-navigable-picker="date" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($heatmapCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapSelection['end']); ?>" <?php echo $heatmapMode === 'daily' ? 'required' : 'disabled'; ?>></div>
                     </div>
                 </div>
                 <div class="heatmap-mode-panel" data-heatmap-mode-panel="month" <?php echo $heatmapMode === 'month' ? '' : 'hidden'; ?>>
-                    <div class="heatmap-date-field heatmap-month-field"><label for="heatmapMonth">Month</label><input id="heatmapMonth" type="month" name="period" data-year-navigable-picker="month" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapMode === 'month' ? $heatmapSelection['period'] : substr($heatmapSelection['start'], 0, 7)); ?>" <?php echo $heatmapMode === 'month' ? 'required' : 'disabled'; ?>></div>
+                    <div class="heatmap-date-field heatmap-month-field"><label for="heatmapMonth">Month</label><input id="heatmapMonth" type="month" name="period" data-year-navigable-picker="month" data-calendar-years='<?php echo htmlspecialchars($heatmapCalendarYearsJson, ENT_QUOTES, 'UTF-8'); ?>' data-calendar-months='<?php echo htmlspecialchars($heatmapCalendarMonthsJson, ENT_QUOTES, 'UTF-8'); ?>' value="<?php echo htmlspecialchars($heatmapMode === 'month' ? $heatmapSelection['period'] : substr($heatmapSelection['start'], 0, 7)); ?>" <?php echo $heatmapMode === 'month' ? 'required' : 'disabled'; ?>></div>
                 </div>
                 <div class="heatmap-mode-panel" data-heatmap-mode-panel="year" <?php echo $heatmapMode === 'year' ? '' : 'hidden'; ?>>
                     <div class="heatmap-date-field heatmap-year-field">
@@ -720,15 +726,17 @@ include 'includes/sidebar.php'; ?>
                         </select>
                     </div>
                 </div>
+              </div>
+              <div class="heatmap-date-field heatmap-search-field">
+                <label for="locationSearch">Search location</label>
+                <div class="heatmap-search-controls">
+                  <input id="locationSearch" type="search" name="search" value="<?php echo htmlspecialchars($heatmapLocationSearch, ENT_QUOTES, 'UTF-8'); ?>">
+                  <button id="resetHeatmapFilters" type="button" class="heatmap-reset">Reset</button>
+                </div>
+              </div>
+              <button class="heatmap-period-submit" type="submit"><?php echo $heatmapMode === 'month' ? 'Apply month' : ($heatmapMode === 'year' ? 'Apply year' : 'Apply dates'); ?></button>
             </div>
-            <button class="heatmap-period-submit" type="submit"><?php echo $heatmapMode === 'month' ? 'Apply month' : ($heatmapMode === 'year' ? 'Apply year' : 'Apply dates'); ?></button>
         </form>
-
-        <section class="heatmap-toolbar" aria-label="Heatmap filters">
-            <div class="heatmap-control"><label for="locationSearch">Search location</label><input id="locationSearch" type="search"></div>
-            <div class="heatmap-control"><label for="sortFilter">Sort locations</label><select id="sortFilter"><option value="highest">Highest waste first</option><option value="lowest">Lowest waste first</option><option value="name">Name A–Z</option></select></div>
-            <button id="resetHeatmapFilters" type="button" class="heatmap-reset">Reset</button>
-        </section>
 
         <!-- Map Area -->
         <div class="map-container">
@@ -984,7 +992,6 @@ include 'includes/sidebar.php'; ?>
         }
 
         var searchInput = document.getElementById("locationSearch");
-        var sortFilter = document.getElementById("sortFilter");
         var locationList = document.getElementById("locationList");
         var heatmapNoRecordsAlert = document.getElementById("heatmapNoRecordsAlert");
         var filterStorageKey = "ecotrackHeatmapFilters:" + <?php echo json_encode((int)($user['id'] ?? 0)); ?>;
@@ -995,11 +1002,21 @@ include 'includes/sidebar.php'; ?>
               filterStorageKey,
               JSON.stringify({
                 search: searchInput.value,
-                sort: sortFilter.value,
               }),
             );
           } catch (error) {
             // Keep filters usable when browser storage is unavailable.
+          }
+          try {
+            var url = new URL(window.location.href);
+            url.searchParams.delete("sort");
+            if (searchInput.value) url.searchParams.set("search", searchInput.value);
+            else url.searchParams.delete("search");
+            if (url.href !== window.location.href) {
+              window.history.replaceState(window.history.state, "", url.href);
+            }
+          } catch (error) {
+            // Search still works if the browser cannot update the URL.
           }
         }
 
@@ -1007,8 +1024,7 @@ include 'includes/sidebar.php'; ?>
           try {
             var saved = JSON.parse(sessionStorage.getItem(filterStorageKey));
             if (!saved || typeof saved !== "object") return;
-            if (typeof saved.search === "string") searchInput.value = saved.search;
-            if (["highest", "lowest", "name"].indexOf(saved.sort) !== -1) sortFilter.value = saved.sort;
+            if (!new URLSearchParams(window.location.search).has("search") && typeof saved.search === "string") searchInput.value = saved.search;
           } catch (error) {
             // Ignore invalid saved preferences.
           }
@@ -1330,42 +1346,15 @@ include 'includes/sidebar.php'; ?>
           return Number.isFinite(totalWaste) ? totalWaste : 0;
         }
 
-        function compareLocationNames(left, right) {
-          return String((left && left.name) || "").localeCompare(String((right && right.name) || ""), "en", {
-            numeric: true,
-            sensitivity: "base",
-          });
-        }
-
-        function compareHeatmapLocations(left, right) {
-          var nameOrder = compareLocationNames(left, right);
-          if (sortFilter.value === "name") return nameOrder;
-
-          var wasteDifference = locationWasteTotal(left) - locationWasteTotal(right);
-          if (wasteDifference !== 0) {
-            return sortFilter.value === "lowest" ? wasteDifference : -wasteDifference;
-          }
-          return nameOrder;
-        }
-
         function renderLocations(preservePosition) {
           var panel = locationList.parentElement;
           var scrollTop = preservePosition ? panel.scrollTop : 0;
           var focusedLocationId = preservePosition && document.activeElement ? document.activeElement.dataset.locationId : null;
           var query = searchInput.value.trim().toLowerCase();
-          locationData.forEach(function (location) {
-            if (location.marker) map.removeLayer(location.marker);
-          });
           var filtered = locationData.filter(function (location) {
             var searchable = (location.name + " " + location.address).toLowerCase();
             return isVisibleHeatmapLocation(location) && (!query || searchable.indexOf(query) !== -1);
           });
-          filtered.sort(compareHeatmapLocations);
-          var visiblePhaseKeys = filtered.map(phaseKeyForLocation).filter(function (key) {
-            return key !== null;
-          });
-          updatePhaseBoundaryVisibility(visiblePhaseKeys);
-          renderPhaseWasteAreas(filtered, visiblePhaseKeys);
           var visibleLocationCount = locationData.filter(isVisibleHeatmapLocation).length;
           document.getElementById("locationResultCount").textContent =
             "Showing " + filtered.length + " of " + visibleLocationCount + " mapped locations";
@@ -1374,25 +1363,14 @@ include 'includes/sidebar.php'; ?>
           filtered.forEach(function (location) {
             var totalWaste = locationWasteTotal(location);
             var level = getWasteLevel(location);
-            if (!phaseKeyForLocation(location)) addMarker(location, level);
             var card = document.createElement("button");
             card.type = "button";
             card.className = "location-card";
-            card.style.setProperty("--marker-color", level.color);
             card.dataset.locationId = location.id;
-            card.innerHTML =
-              '<span class="location-card-title">' +
-              escapeHtml(location.name) +
-              '</span><span class="location-card-meta">' +
-              totalWaste.toFixed(2) +
-              " kg · " +
-              level.label +
-              "</span>";
             var average =
               location.daily_average_kg === null || location.daily_average_kg === undefined
                 ? null
                 : Number(location.daily_average_kg);
-            var classification = location.classification || level;
             card.innerHTML =
               '<span class="location-card-title">' +
               escapeHtml(location.name) +
@@ -1402,8 +1380,6 @@ include 'includes/sidebar.php'; ?>
                   " kg &middot; " +
                   (average === null ? "No daily average" : average.toFixed(2) + " kg/day")
                 : "No selected-period data") +
-              " &middot; " +
-              escapeHtml(classification.label) +
               (location.dss && location.dss.success ? " &middot; Reduced from previous period" : "") +
               "</span>";
             card.addEventListener("click", function () {
@@ -1413,6 +1389,18 @@ include 'includes/sidebar.php'; ?>
             if (location.id === focusedLocationId) card.focus({ preventScroll: true });
           });
           panel.scrollTop = scrollTop;
+
+          locationData.forEach(function (location) {
+            if (location.marker) map.removeLayer(location.marker);
+          });
+          var visiblePhaseKeys = filtered.map(phaseKeyForLocation).filter(function (key) {
+            return key !== null;
+          });
+          updatePhaseBoundaryVisibility(visiblePhaseKeys);
+          renderPhaseWasteAreas(filtered, visiblePhaseKeys);
+          filtered.forEach(function (location) {
+            if (!phaseKeyForLocation(location)) addMarker(location, getWasteLevel(location));
+          });
         }
 
         function updateHeatmapSummary() {
@@ -1453,20 +1441,25 @@ include 'includes/sidebar.php'; ?>
             .join("");
         }
 
-        [searchInput, sortFilter].forEach(function (control) {
-          control.addEventListener(control === searchInput ? "input" : "change", function () {
-            saveHeatmapFilters();
-            renderLocations();
-          });
+        searchInput.addEventListener("input", function () {
+          saveHeatmapFilters();
+          renderLocations();
+        });
+        searchInput.addEventListener("keydown", function (event) {
+          if (event.key === "Enter") event.preventDefault();
+        });
+        window.addEventListener("pageshow", function () {
+          saveHeatmapFilters();
+          renderLocations(true);
         });
         document.getElementById("resetHeatmapFilters").addEventListener("click", function () {
           searchInput.value = "";
-          sortFilter.value = "highest";
           saveHeatmapFilters();
           renderLocations();
           map.setView(barangayBounds.getCenter(), barangayMinZoom);
         });
         restoreHeatmapFilters();
+        saveHeatmapFilters();
         updateHeatmapSummary();
         renderLocations();
 
@@ -1503,7 +1496,8 @@ include 'includes/sidebar.php'; ?>
             .then(function (payload) {
               if (!payload || !Array.isArray(payload.locations) || !Array.isArray(payload.legend)) return;
               var snapshot = JSON.stringify(payload.locations);
-              heatmapSelection = payload.selection || heatmapSelection;
+              if (!payload.selection || payload.selection.view !== heatmapSelection.view || payload.selection.period !== heatmapSelection.period) return;
+              heatmapSelection = payload.selection;
               updateHeatmapPeriodOptions(heatmapSelection);
               phaseMetrics = payload.phase_metrics || phaseMetrics;
               if (snapshot !== locationDataSnapshot) {

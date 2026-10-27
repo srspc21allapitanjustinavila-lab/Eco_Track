@@ -1,3 +1,8 @@
+<?php
+// Some pages include this component themselves; render it only once per page.
+if (defined('ECOTRACK_LOGOUT_MODAL_INCLUDED')) return;
+define('ECOTRACK_LOGOUT_MODAL_INCLUDED', true);
+?>
 <div id="logoutModal" class="shared-logout-modal" aria-hidden="true">
     <div class="shared-logout-content" role="dialog" aria-modal="true" aria-labelledby="logoutModalTitle">
         <div class="shared-logout-header">
@@ -32,7 +37,8 @@
     }
     .shared-logout-content {
       width: min(420px, 100%);
-      overflow: hidden;
+      max-height: calc(100vh - 28px);
+      overflow: auto;
       background: #fff;
       border: 1px solid rgba(255, 255, 255, 0.45);
       border-radius: 18px;
@@ -131,6 +137,7 @@
     }
     .shared-logout-actions .btn-green {
       background: #0b6657 !important;
+      color: #fff !important;
       box-shadow: 0 8px 16px rgba(11, 102, 87, 0.22);
     }
     .shared-logout-actions .btn-green:hover {
@@ -186,15 +193,25 @@
         modal.classList.remove("show");
         modal.setAttribute("aria-hidden", "true");
       }
-      if (sharedLogoutTrigger) sharedLogoutTrigger.focus();
+      if (sharedLogoutTrigger) {
+        const focusTarget = sharedLogoutTrigger.closest('[inert]') ? document.querySelector('[data-sidebar-toggle]') : sharedLogoutTrigger;
+        if (focusTarget) focusTarget.focus();
+      }
     }
     document.addEventListener("click", function (event) {
       const modal = document.getElementById("logoutModal");
       if (modal && event.target === modal) closeLogoutModal();
     });
     document.addEventListener("keydown", function (event) {
+      const modal = document.getElementById("logoutModal");
+      if (event.key === "Tab" && modal && modal.classList.contains("show")) {
+        const controls = Array.from(modal.querySelectorAll('button, a[href]'));
+        if (controls.length && (event.shiftKey ? document.activeElement === controls[0] : document.activeElement === controls[controls.length - 1])) {
+          event.preventDefault();
+          controls[event.shiftKey ? controls.length - 1 : 0].focus();
+        }
+      }
       if (event.key === "Escape") {
-        const modal = document.getElementById("logoutModal");
         if (modal && modal.classList.contains("show")) closeLogoutModal();
       }
     });

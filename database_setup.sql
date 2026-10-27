@@ -9,13 +9,61 @@ CREATE TABLE IF NOT EXISTS users (
     username VARCHAR(50) UNIQUE NOT NULL,
     email VARCHAR(100) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
-    user_type ENUM('admin', 'staff') NOT NULL,
+    user_type ENUM('admin', 'staff', 'waste_collector') NOT NULL,
     first_name VARCHAR(50) NOT NULL,
     last_name VARCHAR(50) NOT NULL,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     last_login TIMESTAMP NULL
 );
+
+-- Bio Collector identities are shared by staff and administrators. Existing
+-- staff-account attendance remains separate and retains its original identity.
+CREATE TABLE IF NOT EXISTS bio_collectors (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(255) NOT NULL,
+    name_key CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL,
+    user_id INT NULL,
+    is_active TINYINT(1) NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_bio_collector_name_key (name_key),
+    UNIQUE KEY unique_bio_collector_user (user_id),
+    CONSTRAINT fk_bio_collector_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE RESTRICT
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS collector_attendance (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    collector_user_id INT NULL,
+    bio_collector_id BIGINT UNSIGNED NULL,
+    attendance_date DATE NOT NULL,
+    status ENUM('present', 'absent', 'late', 'on_leave') NOT NULL,
+    remarks VARCHAR(500) NOT NULL DEFAULT '',
+    recorded_by INT NULL,
+    updated_by INT NULL,
+    deleted_at DATETIME NULL,
+    deleted_by INT NULL,
+    version INT UNSIGNED NOT NULL DEFAULT 1,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY unique_collector_attendance_day (collector_user_id, attendance_date),
+    UNIQUE KEY unique_bio_collector_day (bio_collector_id, attendance_date),
+    INDEX idx_collector_attendance_date_status (attendance_date, status),
+    INDEX idx_collector_attendance_collector_date (collector_user_id, attendance_date),
+    CONSTRAINT fk_collector_attendance_collector FOREIGN KEY (collector_user_id) REFERENCES users(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_attendance_bio_collector FOREIGN KEY (bio_collector_id) REFERENCES bio_collectors(id) ON DELETE RESTRICT,
+    CONSTRAINT fk_collector_attendance_recorded_by FOREIGN KEY (recorded_by) REFERENCES users(id) ON DELETE SET NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS bio_attendance_audit (
+    id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
+    attendance_id BIGINT UNSIGNED NOT NULL,
+    action VARCHAR(12) NOT NULL,
+    actor_id INT NULL,
+    before_json TEXT NULL,
+    after_json TEXT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_bio_attendance_audit_record (attendance_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Per-browser persistent login credentials. The browser receives only the
 -- selector and raw validator; the validator is stored here as a SHA-256 hash.

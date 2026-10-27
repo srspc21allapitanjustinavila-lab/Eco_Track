@@ -62,6 +62,7 @@ checkWeeklyTrend(
 );
 checkWeeklyTrend($monthlyTrend['total_waste'] === 625.0 && $monthlyTrend['event_count'] === 6, 'Archived rows and records from another year are excluded from the selected annual trend.');
 checkWeeklyTrend($monthlyTrend['weeks'][0]['phase_label'] === 'Phase 1A', 'Each monthly bar keeps its actual collection group beside the month.');
+checkWeeklyTrend($monthlyTrend['weeks'][0]['street_label'] === 'Curie St.', 'Each monthly bar exposes its saved street name as readable chart metadata.');
 
 $weeklyFilters = $monthlyFilters;
 $weeklyFilters['view'] = 'week';
@@ -90,10 +91,12 @@ checkWeeklyTrend(
     strpos($trendMarkup, 'trend-bars-yearly') !== false
     && strpos($trendMarkup, 'name="trend_year"') !== false
     && strpos($trendMarkup, 'name="trend_view"') !== false
+    && strpos($trendMarkup, 'name="trend_location"') === false
+    && strpos($trendMarkup, 'class="trend-meta"') !== false
     && strpos($trendMarkup, 'name="trend_week"') === false
     && strpos($trendMarkup, 'name="trend_period"') === false
     && strpos($trendMarkup, 'Trend:</strong>') === false,
-    'The shared renderer has Year and View controls only, compares annual periods, and does not render a trend description.'
+    'The shared renderer provides readable phase/street metadata with Year and View controls only.'
 );
 
 echo 'PASS: ' . $checks . " shared yearly trend checks\n";

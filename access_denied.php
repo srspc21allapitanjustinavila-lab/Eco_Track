@@ -1,6 +1,9 @@
 <?php
 require_once 'config.php';
 initSession();
+$accessDeniedRole = $_SESSION['user']['user_type'] ?? '';
+$accessDeniedIsStaff = $accessDeniedRole === 'staff';
+$accessDeniedIsCollector = $accessDeniedRole === 'waste_collector';
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -193,7 +196,7 @@ initSession();
             <h1 id="access-denied-title" class="error-title">Access restricted</h1>
             <p class="error-message">You don't have permission to open this page. Return to your dashboard, or contact an administrator if you think this is an error.</p>
             <nav class="access-actions" aria-label="Access recovery options">
-                <a href="<?php echo isset($_SESSION['user_type']) && $_SESSION['user_type'] == 'staff' ? 'staff_home.php' : 'admin_dashboard.php'; ?>" class="btn"><?php echo isset($_SESSION['user_type']) && $_SESSION['user_type'] == 'staff' ? 'Go to Home' : 'Go to Dashboard'; ?> <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
+                <a href="<?php echo $accessDeniedIsCollector ? 'waste_collector_attendance.php' : ($accessDeniedIsStaff ? 'staff_home.php' : 'admin_dashboard.php'); ?>" class="btn"><?php echo $accessDeniedIsCollector ? 'Go to Attendance' : ($accessDeniedIsStaff ? 'Go to Home' : 'Go to Dashboard'); ?> <i class="bi bi-arrow-right" aria-hidden="true"></i></a>
                 <a href="login.php" class="back-link"><i class="bi bi-box-arrow-left" aria-hidden="true"></i> Back to Login</a>
             </nav>
         </section>

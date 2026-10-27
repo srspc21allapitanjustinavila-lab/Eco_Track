@@ -8,6 +8,9 @@ $html = preg_replace_callback('/<\?php(.*?)\?>/s', static function ($match) {
     if (strpos($match[1], '$dssCalendarYearsJson') !== false) {
         return json_encode([2026, 2025, 2024]);
     }
+    if (strpos($match[1], '$dssCalendarMonthsJson') !== false) {
+        return json_encode(['2026' => [12], '2025' => [2, 9], '2024' => [1]]);
+    }
     if (strpos($match[1], 'foreach') !== false) {
         return '';
     }

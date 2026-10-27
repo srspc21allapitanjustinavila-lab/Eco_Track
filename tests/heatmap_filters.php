@@ -20,18 +20,36 @@ foreach ($records as $index => $record) {
 $analytics = buildHeatmapPeriodAnalytics($records, $current, $previous, $selection);
 $locations = $analytics['locations'];
 $payload = $analytics;
+$annualFixtures = [];
+foreach ([2025, 2026] as $fixtureYear) {
+    $annualCurrent = $current;
+    foreach ($annualCurrent as $index => &$allocation) {
+        $allocation['allocation_date'] = $fixtureYear . '-12-31';
+        $allocation['kilogram_of_waste'] *= $fixtureYear === 2025 ? ($index % 3) + 1 : 1;
+    }
+    unset($allocation);
+    $annualSelection = resolveHeatmapPeriodSelection([$fixtureYear . '-12-31'], 'year', (string)$fixtureYear);
+    $annualFixtures[$fixtureYear] = buildHeatmapPeriodAnalytics($records, $annualCurrent, [], $annualSelection);
+}
+$fixtureSearch = (string)($_GET['search'] ?? '');
 
 $source = file_get_contents(__DIR__ . '/../waste_heatmap.php');
 $html = substr($source, strpos($source, '<!DOCTYPE html>'));
 if (isset($_GET['without_leaflet'])) {
     $html = preg_replace('#<script src="https://unpkg\.com/leaflet@1\.9\.4/dist/leaflet\.js"[^>]*></script>#', '', $html, 1);
 }
-$html = preg_replace_callback('/<\?php(.*?)\?>/s', static function ($match) use ($locations, $analytics) {
+$html = preg_replace_callback('/<\?php(.*?)\?>/s', static function ($match) use ($locations, $analytics, $fixtureSearch) {
+    if (strpos($match[1], '$heatmapLocationSearch') !== false) {
+        return htmlspecialchars($fixtureSearch, ENT_QUOTES, 'UTF-8');
+    }
     if (strpos($match[1], 'foreach') !== false) {
         return '';
     }
     if (strpos($match[1], '$heatmapCalendarYearsJson') !== false) {
         return json_encode([2026, 2025, 2024]);
+    }
+    if (strpos($match[1], '$heatmapCalendarMonthsJson') !== false) {
+        return json_encode(['2026' => [1, 2, 3], '2025' => [9], '2024' => [12]]);
     }
     if (strpos($match[1], '$heatmapLocationsJson') !== false) {
         return json_encode($locations);
@@ -58,6 +76,7 @@ $html = preg_replace(
 );
 $setup = '<base href="../"><script>
     window.heatmapFixture = ' . json_encode($payload) . ';
+    window.heatmapAnnualFixtures = ' . json_encode($annualFixtures) . ';
     window.heatmapFixtureErrors = [];
     window.addEventListener("error", function (event) {
         window.heatmapFixtureErrors.push(event.message || "Unknown browser error");
